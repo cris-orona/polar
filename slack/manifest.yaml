@@ -1,0 +1,43 @@
+display_information:
+  name: Polar
+  description: Polar te pide un sí o un no.
+  background_color: "#1d2433"
+features:
+  app_home:
+    home_tab_enabled: true
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: Polar
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - im:write
+      - im:history
+      - files:write
+      - files:read
+    user:
+      - chat:write
+      - search:read
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+      - users:read
+      - channels:read
+      - groups:read
+      - mpim:read
+      - files:read
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.im
+      - app_mention
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

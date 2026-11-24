@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.polar</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/polar/.venv/bin/python3</string>
+    <string>-m</string>
+    <string>polar</string>
+    <string>serve</string>
+  </array>
+  <key>WorkingDirectory</key><string>__HOME__/polar</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>POLAR_DATA_DIR</key><string>__HOME__/polar/data</string>
+    <key>POLAR_DELIVERY</key><string>dm</string>
+    <key>POLAR_SLACK_REMINDERS</key><string>off</string>
+    <key>POLAR_OWNER_ID</key><string>U0000000000</string>
+    <key>POLAR_TASK_MAX</key><string>14</string>
+    <key>POLAR_WEB_ALLOW</key><string>send,prod</string>
+    <key>POLAR_WEB_PORT</key><string>8791</string>
+    <key>POLAR_WEB_URL</key><string>https://polar-web.example.com</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>__HOME__/polar/data/polar.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/polar/data/polar.log</string>
+</dict>
+</plist>

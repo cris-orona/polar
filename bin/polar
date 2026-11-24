@@ -1,0 +1,7 @@
+#!/bin/sh
+# Run Polar with the repo venv when it exists. Sessions call this over ssh.
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+PY="$HERE/.venv/bin/python3"
+[ -x "$PY" ] || PY=python3
+export POLAR_DATA_DIR="${POLAR_DATA_DIR:-$HERE/data}"
+cd "$HERE" && exec "$PY" -m polar "$@"
