@@ -25,6 +25,12 @@ from polar import blocks, db, files
 log = logging.getLogger("polar")
 
 # Where a new session runs when the router does not say: the always-on server (POLAR_DEFAULT_WHERE=laptop: your laptop).
+# Name of the always-on host. It shows in owner texts («en mac-server») and is stored as the task host.
+# Unset: «el servidor» in texts and `server` as host (POLAR_SERVER_NAME).
+SERVER_NAME = (os.environ.get("POLAR_SERVER_NAME") or "").strip()
+SERVER_LABEL = SERVER_NAME or "el servidor"
+# launchd label of the coord-tick agent: the watchdog text tells the owner how to kick it.
+COORD_TICK_LABEL = os.environ.get("POLAR_COORD_TICK_LABEL") or "coord-tick"
 DEFAULT_WHERE = "laptop" if os.environ.get("POLAR_DEFAULT_WHERE") == "laptop" else "server"
 TITLE_MAX = 60
 MIN_ITEMS = 3
@@ -95,20 +101,43 @@ def task_model(text: str = "") -> str:
     return "fable" if any(m in low for m in ("[difícil]", "[dificil]", "[fable]")) else "opus"
 
 
+def open_model(m: str) -> str:
+    """opus instead of fable while the weekly Fable limit is used up. The check is a command you give in
+    POLAR_MODEL_FULL_CMD: it exits 0 when the weekly limit of that model is used up. It gets the model name as the
+    last argument (for example `my-tool model-full fable`: set POLAR_MODEL_FULL_CMD="my-tool model-full").
+    Unset, or any error: keep `m`."""
+    cmd = os.environ.get("POLAR_MODEL_FULL_CMD", "").strip()
+    if not cmd or not m or "fable" not in m.lower():
+        return m
+    try:
+        full = subprocess.run([os.path.expanduser(x) for x in shlex.split(cmd)] + ["fable"], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        full = False
+    return "opus" if full else m
+
+
 def model_flag(text: str = "") -> str:
-    m = task_model(text)
+    m = open_model(task_model(text))
     return ("--model %s " % shlex.quote(m)) if m else ""
 
-# Path of the polar command inside a task session. POLAR_TASK_RULES adds your own rules to the brief.
+# Path of the polar command inside a task session. POLAR_TASK_RULES adds your own rules to the brief (after «no browser»).
 POLAR_BIN = os.environ.get("POLAR_BIN") or "~/polar/bin/polar"
+
+def _extra_rules() -> str:
+    """POLAR_TASK_RULES goes right after «no browser». It may start with «;» or «.»; else a «. » is added."""
+    x = (os.environ.get("POLAR_TASK_RULES") or "").strip()
+    if not x:
+        return "."
+    return x if x[0] in ";.," else ". " + x
+
 
 BRIEF = (
     "Owner task from Polar (task {id}): {text}\n\n"
-    "Rules: read ~/.claude/CLAUDE.md. You run on a headless server: no browser. "
-    "{extra_rules}"
-    "Investigate first, then write a short plan. "
+    "Rules: read ~/.claude/CLAUDE.md. You run on {where}: no browser{extra_rules} "
+    "Start with memory recall, then investigate and write a short plan. "
     "A card that asks the owner to approve or choose must explain the proposal in the card: --text-file with what it is, what changes for whom, a real example and the risk (5-8 lines, Spanish), plus --link to the PR or doc. Never send him to the terminal. "
-    "Send reading-heavy work (repo exploration, log scans, wide queries) to subagents; keep decisions and critical edits here. "
+    "Send reading-heavy work (repo exploration, log scans, wide queries) to subagents on Sonnet "
+    "(general-purpose is Sonnet; pass model: \"sonnet\" to Explore); keep decisions and critical edits here. "
     "Ask the owner only through `{polar_bin} ask ... --thread {thread} --channel {channel} "
     "--requester \"{session} task-{id}\"` so cards land in the task thread and the answer is typed into this session. "
     "If a step needs the laptop (browser, a laptop-only MCP), hand it off: polar handoff --title T --text-file F --requester \"<your session id> <your tmux name>\"; the laptop session sends you the result. "
@@ -428,7 +457,7 @@ class Tasks:
         except Exception as exc:  # a full disk, a bad folder: the message must still reach a session
             log.error("files of %s not saved: %s", key, type(exc).__name__)
             n = len(found)
-            return ("Archivos adjuntos que no pude bajar (%d): error al guardarlos en el servidor." % n,
+            return ("Archivos adjuntos que no pude bajar (%d): error al guardarlos en %s." % (n, SERVER_LABEL),
                     " (⚠️ no pude bajar %d)" % n)
         ok = len([r for r in rows if r.get("path")])
         bad = len(rows) - ok
@@ -618,8 +647,8 @@ class Tasks:
         if root != ts:
             link += "?thread_ts=%s&cid=%s" % (root, channel)
         text = ("%s\n\nHilo donde me etiquetaste: %s (canal %s, hilo %s). Léelo con "
-                "`~/polar/bin/polar thread %s %s`; si un mensaje del hilo trae `files`, baja cada uno con "
-                "`polar files <id del archivo>`." % (ask, link, channel, root, channel, root))
+                "`%s thread %s %s`; si un mensaje del hilo trae `files`, baja cada uno con "
+                "`polar files <id del archivo>`." % (ask, link, channel, root, POLAR_BIN, channel, root))
         note, _ = self.attach(files.message_files(ev), ts)
         if note:
             text += "\n\n" + note
@@ -983,16 +1012,16 @@ class Tasks:
         if age < COORD_STALE:
             if self._coord_alert_at is not None:
                 self._coord_alert_at = None
-                self.say(OWNER_DM, None, "✅ Watchdog: coord-tick volvió a correr en el servidor.")
+                self.say(OWNER_DM, None, "✅ Watchdog: coord-tick volvió a correr en %s." % SERVER_LABEL)
             return
         if self._coord_alert_at is not None and now - self._coord_alert_at < COORD_REPEAT:
             return
         self._coord_alert_at = now
         log.error("coord-tick heartbeat is %d min old", int(age // 60))
         self.say(OWNER_DM, None,
-                 f"⚠️ Watchdog: coord-tick lleva {int(age // 60)} min sin correr en el servidor. Sin él no llegan "
+                 f"⚠️ Watchdog: coord-tick lleva {int(age // 60)} min sin correr en {SERVER_LABEL}. Sin él no llegan "
                  "respuestas de Slack ni de Polar a las sesiones. Revisa con: "
-                 "`launchctl kickstart -k gui/$(id -u)/coord-tick` en el servidor.")
+                 f"`launchctl kickstart -k gui/$(id -u)/{COORD_TICK_LABEL}` en {SERVER_LABEL}.")
 
     def reap(self) -> None:
         live = self.live_sessions()
@@ -1042,7 +1071,7 @@ class Tasks:
         name = "task-" + t["id"]
         if not claude:
             self.update(t["id"], status="failed", finished_at=db.now_iso())
-            self.say(t["channel"], t["thread_ts"], "⚠️ No encuentro claude en el servidor.")
+            self.say(t["channel"], t["thread_ts"], "⚠️ No encuentro claude en %s." % SERVER_LABEL)
             return False
         # Take the task first: the laptop may claim it in the same moment (overflow). Only one of the two wins.
         cur = self.conn.execute("UPDATE tasks SET status='running', updated_at=? WHERE id=? AND kind='task'"
@@ -1054,7 +1083,8 @@ class Tasks:
         sid = str(uuid.uuid4())
         brief = BRIEF.format(id=t["id"], text=t["text"], thread=t["thread_ts"],
                              channel=OWNER_DM, session=sid,
-                             polar_bin=POLAR_BIN, extra_rules=os.environ.get("POLAR_TASK_RULES", ""))
+                             polar_bin=POLAR_BIN, where=SERVER_NAME or "a headless server",
+                             extra_rules=_extra_rules())
         bdir = db.data_dir() / "briefs"
         bdir.mkdir(parents=True, exist_ok=True)
         bfile = bdir / (name + ".txt")
@@ -1068,11 +1098,11 @@ class Tasks:
         rc, _ = self.tmux("new-session", "-d", "-s", name, "-c", str(work), cmd)
         if rc != 0:
             self.update(t["id"], status="failed", finished_at=db.now_iso())
-            self.say(t["channel"], t["thread_ts"], "⚠️ No pude abrir la sesión en el servidor.")
+            self.say(t["channel"], t["thread_ts"], "⚠️ No pude abrir la sesión en %s." % SERVER_LABEL)
             return False
         self.update(t["id"], status="running", tmux=name, session_id=sid, started_at=db.now_iso())
-        self.status_line(t["id"], "▶️ Abrí \"%s\" en el servidor (%s). En la laptop aparece como pestaña ☁️." % (
-            t["title"], name))
+        self.status_line(t["id"], "▶️ Abrí \"%s\" en %s (%s). En la laptop aparece como pestaña ☁️." % (
+            t["title"], SERVER_LABEL, name))
         return True
 
     def resume_session(self, session_id: str) -> bool:

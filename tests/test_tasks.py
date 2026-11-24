@@ -723,3 +723,40 @@ def test_outcome_report_chosen_not_typed(tk, sh, conn):
     tk.notify_outcomes()
     assert [c for c in sh.of("send-keys") if "-l" in c] == []
     assert conn.execute("SELECT 1 FROM task_notes WHERE request_id=?", (rid,)).fetchone()
+
+
+def test_fable_at_its_limit_starts_on_opus(monkeypatch):
+    """A [difícil] task starts on opus while POLAR_MODEL_FULL_CMD (plus «fable») exits 0. Unset: no check."""
+    from polar import tasks as T
+    monkeypatch.delenv("AGENT_TASK_MODEL", raising=False)
+    monkeypatch.delenv("POLAR_MODEL_FULL_CMD", raising=False)
+    seen = []
+    rc = {"v": 0}
+
+    def fake(argv, **k):
+        seen.append(argv)
+        return type("R", (), {"returncode": rc["v"]})()
+    monkeypatch.setattr(T.subprocess, "run", fake)
+    assert T.model_flag("[difícil] algo") == "--model fable "      # unset: no-op, no call
+    assert seen == []
+    monkeypatch.setenv("POLAR_MODEL_FULL_CMD", "my-tool model-full")
+    assert T.model_flag("[difícil] algo") == "--model opus "
+    assert seen[-1] == ["my-tool", "model-full", "fable"]
+    rc["v"] = 1
+    assert T.model_flag("[difícil] algo") == "--model fable "
+
+    def boom(*a, **k):
+        raise OSError("no tool")
+    monkeypatch.setattr(T.subprocess, "run", boom)
+    assert T.model_flag("[difícil] algo") == "--model fable "
+    assert T.model_flag("normal") == "--model opus "
+
+
+def test_brief_extra_rules_and_server_name(monkeypatch):
+    from polar import tasks as T
+    monkeypatch.delenv("POLAR_TASK_RULES", raising=False)
+    assert T._extra_rules() == "."
+    monkeypatch.setenv("POLAR_TASK_RULES", "; use the tool X.")
+    assert T._extra_rules() == "; use the tool X."
+    monkeypatch.setenv("POLAR_TASK_RULES", "Use Y.")
+    assert T._extra_rules() == ". Use Y."

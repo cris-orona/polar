@@ -114,7 +114,10 @@ Edit the plist first (label, owner id, URLs).
 | `POLAR_TASK_MAX`, `POLAR_TASK_MIN_FREE_GB`, `POLAR_WORK_DIR` | see reference | Limits and folder for tmux task sessions. |
 | `POLAR_CLAUDE_BIN`, `POLAR_CLAUDE_ARGS`, `POLAR_TMUX_BIN` | see reference | How task sessions start. |
 | `POLAR_BIN` | `~/polar/bin/polar` | Path of the CLI as written in the task brief. |
-| `POLAR_TASK_RULES` | empty | Extra rules text added to the brief of each task session. |
+| `POLAR_TASK_RULES` | empty | Extra rules text added to the brief of each task session, right after «no browser». Start it with `;` or `.`, or Polar adds `. `. |
+| `POLAR_SERVER_NAME` | empty | Name of the always-on host. Owner texts say «en <name>» (else «en el servidor») and new tasks store it as host (else `server`). |
+| `POLAR_COORD_TICK_LABEL` | `coord-tick` | launchd label that the coord-tick watchdog text tells the owner to kick. |
+| `POLAR_MODEL_FULL_CMD` | empty | Command (for example `my-tool model-full`) that gets the model name `fable` as last argument and exits 0 when the weekly limit of that model is used up. Then new tasks start on `opus`. Unset: no check. |
 | `POLAR_DEFAULT_WHERE` | `server` | `laptop` makes the laptop the default task host. |
 | `AGENT_TASK_MODEL` | `opus` | Model flag for task sessions. Empty means no flag. |
 

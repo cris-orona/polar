@@ -123,7 +123,8 @@ TASK_NEW_COLUMNS = {
     "route_done": "INTEGER NOT NULL DEFAULT 0",
     "card_ts": "TEXT",
     "laptop_tab": "TEXT",
-    "host": "TEXT NOT NULL DEFAULT 'server'",
+    "host": "TEXT NOT NULL DEFAULT '%s'" % (
+        "".join(c for c in (os.environ.get("POLAR_SERVER_NAME") or "server") if c.isalnum() or c in "-_.") or "server"),
     "where_hint": "TEXT NOT NULL DEFAULT 'laptop'",
     "status_ts": "TEXT",    # the one status message of the task (edited in place)
     "status_text": "TEXT",  # what that message says now
