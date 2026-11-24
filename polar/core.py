@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from polar import blocks, db
+from polar import alarm, blocks, db
 from polar.tasks import OK_SUBTYPES, OWNER_DM, Tasks, _epoch, card_has_reader
 
 log = logging.getLogger("polar")
@@ -204,7 +204,8 @@ class Polar:
                 self.fetch_original(req)
                 req = db.get(self.conn, req["id"]) or req
             status = "noted" if req["kind"] == "report" else "shown"  # a report needs no click
-            if web:  # the web is the channel: no DM, so no dm_channel and no dm_ts
+            # The web is the channel, or the card is a canary: no DM, so no dm_channel and no dm_ts
+            if web or (req.get("extra") or {}).get("canary"):
                 if db.transition(self.conn, req["id"], "pending", status):
                     sent += 1
                 continue
@@ -829,6 +830,8 @@ class Polar:
             db.transition(self.conn, rid, "sending", "failed",
                           result_json=_res(src, error=error_code(exc)),
                           decided_at=db.now_iso())
+            alarm.alarm("polar:send-failed", "Polar: no salió un mensaje que aprobaste",
+                        "%s no se envió: %s" % (rid, error_code(exc)))
         self.refresh_dm(rid)
 
     def _send_email(self, req: Dict[str, Any], text: str, src: Optional[str] = None) -> None:
@@ -842,6 +845,7 @@ class Polar:
             code = "Gmail no está conectado" if isinstance(exc, gmail.NotConnected) else gmail.error_code(exc)
             db.transition(self.conn, rid, "sending", "failed",
                           result_json=_res(src, error=code), decided_at=db.now_iso())
+            alarm.alarm("polar:send-failed", "Polar: no salió un correo que aprobaste", "%s no se envió: %s" % (rid, code))
         self.refresh_dm(rid)
 
     def on_discard(self, user_id: str, rid: str, src: Optional[str] = None) -> None:
@@ -1159,6 +1163,7 @@ class Polar:
             db.transition(self.conn, r["id"], "sending", "failed",
                           result_json=json.dumps({"error": "interrupted: revisa el canal antes de reintentar"}),
                           decided_at=db.now_iso())
+            alarm.alarm("polar:send-failed", "Polar: un envío quedó interrumpido", "%s: revisa el canal" % r["id"])
         # A report in flight from an older version shows «Visto». Move it to noted and redraw it.
         for r in self.conn.execute(
                 "SELECT id FROM requests WHERE status='shown' AND kind='report'").fetchall():

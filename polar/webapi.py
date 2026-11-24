@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from polar import blocks, db
+from polar import alarm, blocks, db
 from polar.core import Polar
 
 log = logging.getLogger("polar")
@@ -313,6 +313,7 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # never show the text: it could hold a token
             log.error("web action failed: %s", type(exc).__name__)
             code, out = 500, {"ok": False, "error": "Error interno."}
+            alarm.alarm("polar:web500", "Polar: la API web devolvió un error 500", "web action failed: %s" % type(exc).__name__)
         self._json(code, out)
 
 

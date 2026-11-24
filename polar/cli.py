@@ -115,6 +115,9 @@ def build_parser() -> argparse.ArgumentParser:
             a.add_argument("--where", default="server", choices=["server", "laptop"])
         else:
             a.add_argument("--option", action="append", default=[], required=True)
+            if kind == "decision":
+                a.add_argument("--canary", action="store_true",
+                               help="hourly test card of harness-canary: hidden from Mando, no DM")
 
         if kind in ("decision", "questions"):
             a.add_argument("--text-file", help="Markdown body shown as «📄 Qué es» (what the proposal is); - = stdin")
@@ -537,7 +540,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
         rid = db.create_request(
             conn, "decision", args.title, args.context, args.requester,
             options=[_parse_option(o) for o in args.option], expires_hours=args.expires_hours,
-            requester_label=args.requester_label, replaces=args.replaces, extra=extra)
+            requester_label=args.requester_label, replaces=args.replaces, extra=extra,
+            canary=bool(getattr(args, "canary", False)))
     _replace_old(args, rid)
     _out({"id": rid})
     return 0

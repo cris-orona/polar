@@ -16,6 +16,7 @@
     <key>POLAR_DATA_DIR</key><string>__HOME__/polar/data</string>
     <key>POLAR_DELIVERY</key><string>dm</string>
     <key>POLAR_SLACK_REMINDERS</key><string>off</string>
+    <key>POLAR_ALARM_BIN</key><string>__HOME__/.local/bin/polar-alarm</string>
     <key>POLAR_OWNER_ID</key><string>U0000000000</string>
     <key>POLAR_TASK_MAX</key><string>14</string>
     <key>POLAR_WEB_ALLOW</key><string>send,prod</string>

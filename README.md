@@ -118,8 +118,11 @@ Edit the plist first (label, owner id, URLs).
 | `POLAR_SERVER_NAME` | empty | Name of the always-on host. Owner texts say «en <name>» (else «en el servidor») and new tasks store it as host (else `server`). |
 | `POLAR_COORD_TICK_LABEL` | `coord-tick` | launchd label that the coord-tick watchdog text tells the owner to kick. |
 | `POLAR_MODEL_FULL_CMD` | empty | Command (for example `my-tool model-full`) that gets the model name `fable` as last argument and exits 0 when the weekly limit of that model is used up. Then new tasks start on `opus`. Unset: no check. |
+| `POLAR_ALARM_BIN` | empty | Command for loud failures (a path, may include fixed arguments). Polar runs `<bin> --key K --title T --text X` when a tick keeps failing (3 in 5 minutes), an approved send fails, a send is found interrupted at start, or the web API returns 500. Unset or missing binary: Polar only writes the alarm to the log. |
 | `POLAR_DEFAULT_WHERE` | `server` | `laptop` makes the laptop the default task host. |
 | `AGENT_TASK_MODEL` | `opus` | Model flag for task sessions. Empty means no flag. |
+
+Canary card: `polar ask decision ... --canary` queues a test card for an end-to-end health check. It is stored with a `canary` marker in its extras, goes to no DM (Slack or otherwise) and is meant to be hidden by a web page. Only a decision can be a canary.
 
 More variables (timeouts, triage, Gmail) are in `docs/reference.md` and the source.
 

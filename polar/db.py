@@ -345,8 +345,10 @@ def create_request(
     report: Optional[Dict[str, Any]] = None,
     extra: Optional[Dict[str, Any]] = None,
     silent: bool = False,
+    canary: bool = False,
 ) -> str:
-    """Insert a request. `silent` (reports only) stores it as already posted: status «noted», dm_done=1 and no
+    """Insert a request. `canary` (decision only) marks the hourly end-to-end test card: extras_json gets
+    "canary": true; Mando hides it and no DM is sent. `silent` (reports only) stores it as already posted: status «noted», dm_done=1 and no
     dm_ts, so deliver_pending never sends it. Mando and the web API still read it as a posted report."""
     if kind not in KINDS:
         raise ValueError("bad kind")
@@ -380,7 +382,11 @@ def create_request(
         if len(set(keys)) != len(keys):
             raise ValueError("option keys must be unique")
     extras_json = None
-    if extra and kind in ("decision", "questions"):
+    if canary:
+        if kind != "decision":
+            raise ValueError("only a decision can be a canary")
+        extras_json = json.dumps({"body": "canary", "links": [], "files": [], "canary": True})
+    elif extra and kind in ("decision", "questions"):
         body = (extra.get("body") or "").strip()
         clean = validate_report(extra.get("links"), extra.get("files"), None)
         if body or clean["links"] or clean["files"]:

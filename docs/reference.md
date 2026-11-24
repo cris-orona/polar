@@ -26,6 +26,7 @@ Only `POLAR_OWNER_ID`  can act on the buttons.
 ```sh
 bin/polar ask reply --channel C… [--thread TS] (--text T | --text-file F) --title T --context T --requester R
 bin/polar ask decision --title T --context T --option go:Go --option wait:Esperar --requester R
+bin/polar ask decision ... --canary   # test card for a health check: no DM
 bin/polar ask … --replaces <id>   # the new card replaces your earlier card <id>
 bin/polar discard <id>            # withdraw your own card (shown, pending or revise)
 bin/polar status <id>

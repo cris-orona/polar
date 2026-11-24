@@ -8,7 +8,7 @@ import sys
 import threading
 from typing import Any, Dict, Optional
 
-from polar import db
+from polar import alarm, db
 from polar.core import Polar, error_code
 from polar.tokens import TOKENS, get_token
 
@@ -195,12 +195,16 @@ def serve() -> int:
     polar.recover()
     stop = threading.Event()
 
+    burst = alarm.Burst(3, 300)
+
     def loop() -> None:
         while not stop.wait(TICK_SECONDS):
             try:
                 polar.tick()
             except Exception as exc:  # keep the loop alive
                 log.error("tick failed: %s", error_code(exc))
+                if burst.hit():  # 3 failed ticks in 5 minutes: not a blip
+                    alarm.alarm("polar:tick", "Polar: el ciclo de entrega falla", "tick failed: %s" % error_code(exc))
 
     threading.Thread(target=loop, daemon=True).start()
     from polar import webapi

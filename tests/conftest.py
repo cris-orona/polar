@@ -6,6 +6,12 @@ from polar.core import Polar
 OWNER = "U0000000000"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_alarm(monkeypatch):
+    """A test never runs a real alarm command. test_alarm.py sets a fake one."""
+    monkeypatch.delenv("POLAR_ALARM_BIN", raising=False)
+
+
 class FakeClient:
     def __init__(self, name):
         self.name = name
