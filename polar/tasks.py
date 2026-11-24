@@ -25,7 +25,7 @@ from polar import blocks, db, files
 log = logging.getLogger("polar")
 
 # Where a new session runs when the router does not say: the always-on server (POLAR_DEFAULT_WHERE=laptop: your laptop).
-# Name of the always-on host. It shows in owner texts («en mac-server») and is stored as the task host.
+# Name of the always-on host. It shows in owner texts («en <name>») and is stored as the task host.
 # Unset: «el servidor» in texts and `server` as host (POLAR_SERVER_NAME).
 SERVER_NAME = (os.environ.get("POLAR_SERVER_NAME") or "").strip()
 SERVER_LABEL = SERVER_NAME or "el servidor"
