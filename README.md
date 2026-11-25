@@ -7,6 +7,8 @@ send a message as you, pick one option, or answer a few questions. Polar gives t
 CLI command for this. Polar then sends you a card in a Slack DM with buttons. Your click is
 the approval.
 
+The story behind it: [How I run a software factory of coding agents](https://crisorona.me/blog/software-factory.html).
+
 ## The problem
 
 - An agent that runs in auto mode should not post to Slack as you. It has no way to prove
