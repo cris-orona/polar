@@ -83,6 +83,8 @@ the requester session and the Slack or Gmail post are the same. The stored resul
 | `discard` | | reply, email | `on_discard` |
 | `revise` | `text` | reply, decision, email, report, questions | `on_revise_submit` |
 | `next` | `index` (int) or `indexes` (list of 1 to 3 distinct ints) | report | `on_next` |
+| `later` | `when`: `manana`, `3d`, `lunes` or `prod` | report; decision or questions already answered | `followups.add_later` (bus `followup add --by owner`); 200 `{ok, followup}`; 400 bad input, 409 not allowed on this card, 422 the bus refused (Spanish `error`). The status does not change |
+| `fu_cancel` | `fu` (int, bus follow-up id) | any card that lists it | `followups.cancel_followup` (bus `followup cancel`); 200 `{ok, followup}` (`state` `delivered` means too late) |
 | `seen` | | any | none (a report is «noted» from the start); returns the status |
 
 `answer` needs an answer for every question (earlier answers from Slack count). `POLAR_WEB_URL` adds a

@@ -137,6 +137,12 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--file", action="append", default=[], help="file to attach in the card thread")
     rp.add_argument("--next", action="append", default=[], metavar="TEXT",
                     help="a follow-up you suggest; the owner starts it with one tap, or checks several (max 3, 70 chars each)")
+    rp.add_argument("--revisar", action="append", default=[], metavar="SPEC|what",
+                    help='schedule a follow-up: the bus hands "what" back to this session when SPEC is met, and the '
+                         'card shows «🗓 Revisaré …» with «Cancelar». Repeat, max 3. SPEC: "30-nov 10:00", '
+                         '"mañana 9:00", "+3d 9:00", "lunes 9:00", "+2h", "prod:<repo>#<n>", "ci:<repo>#<n>" '
+                         '(in the time zone of the bus). Example: --revisar "30-nov 10:00|Mide Polar contra la línea base". '
+                         'Needs the session id in --requester. A bad SPEC refuses the whole command')
     rp.add_argument("--requester", default="")
     rp.add_argument("--requester-label", default="", help="session topic shown as «Sesión: …»")
     rp.add_argument("--resume", metavar="SESSION_ID", help="adds «Reanudar»: claude --resume <id> on the task host")
@@ -569,13 +575,58 @@ def cmd_report(args: argparse.Namespace) -> int:
         if not os.path.isfile(path):
             raise ValueError("file not found: %s" % f)
         files.append(keep_file(path))
-    rid = db.create_request(
-        db.connect(), "report", args.title, "", args.requester, draft_text=text,
-        expires_hours=args.expires_hours or db.REPORT_EXPIRY_HOURS,
-        requester_label=args.requester_label,
-        report={"links": args.link, "files": files, "resume": args.resume, "next": args.next},
-        silent=args.silent, target_channel=args.channel, target_thread_ts=args.thread)
-    _out({"id": rid})
+    report = {"links": args.link, "files": files, "resume": args.resume, "next": args.next}
+    if not args.revisar:
+        rid = db.create_request(
+            db.connect(), "report", args.title, "", args.requester, draft_text=text,
+            expires_hours=args.expires_hours or db.REPORT_EXPIRY_HOURS,
+            requester_label=args.requester_label, report=report,
+            silent=args.silent, target_channel=args.channel, target_thread_ts=args.thread)
+        _out({"id": rid})
+        return 0
+    return _report_with_followups(args, text, report)
+
+
+def _report_with_followups(args: argparse.Namespace, text: str, report: Dict[str, Any]) -> int:
+    """`--revisar`: check every follow-up with the bus first, add them, create the card, then link them to it."""
+    from polar import followups as fu
+    if len(args.revisar) > fu.MAX_FOLLOWUPS:
+        raise ValueError("report takes at most %d --revisar follow-ups" % fu.MAX_FOLLOWUPS)
+    items = [fu.parse_revisar(r) for r in args.revisar]
+    db.validate_report(report["links"], report["files"], report["resume"], report["next"])  # refuse before the bus
+    sid = fu.session_id(args.requester)
+    if not sid:
+        raise ValueError(fu.NO_SESSION)
+    for spec, what in items:  # nothing is stored until every item passes
+        check = fu.add(spec, sid, "session", args.title, text=what, dry_run=True)
+        if check.get("error"):
+            raise ValueError(str(check["error"]))
+    added: List[Dict[str, Any]] = []
+
+    def undo() -> None:
+        for e in added:
+            fu.cancel(e["id"], by="session")
+
+    for spec, what in items:
+        data = fu.add(spec, sid, "session", args.title, text=what)
+        if data.get("error") or data.get("id") is None:
+            undo()
+            raise ValueError(str(data.get("error") or fu.BUS_DOWN))
+        added.append(fu.entry(dict(data, text=data.get("text") or what)))
+    try:
+        rid = db.create_request(
+            db.connect(), "report", args.title, "", args.requester, draft_text=text,
+            expires_hours=args.expires_hours or db.REPORT_EXPIRY_HOURS,
+            requester_label=args.requester_label, report=report, followups=added,
+            silent=args.silent, target_channel=args.channel, target_thread_ts=args.thread)
+    except Exception:
+        undo()
+        raise
+    for e in added:
+        linked = fu.set_card(e["id"], rid)
+        if linked.get("error"):
+            print("polar: follow-up %s was not linked to the card: %s" % (e["id"], linked["error"]), file=sys.stderr)
+    _out({"id": rid, "followups": [e["id"] for e in added]})
     return 0
 
 

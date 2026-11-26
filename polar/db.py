@@ -115,6 +115,7 @@ NEW_COLUMNS = {
     "compact": "INTEGER NOT NULL DEFAULT 0",  # the body step (blocks.BODY_LIMITS) that Slack accepted
     "and_continue": "INTEGER NOT NULL DEFAULT 0",  # decision chosen with «Sí, y sigue»: the session goes on with the plan
     "silent": "INTEGER NOT NULL DEFAULT 0",  # `polar report --silent`: a machine notice; Mando keeps it out of Foco
+    "followups_json": "TEXT",  # scheduled follow-ups shown on the card: [{"id","phrase","text","by","state"}] (see polar/followups.py)
 }
 
 
@@ -255,6 +256,7 @@ def _row(r: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
         d["options"] = []
     d["extra"] = json.loads(d["extras_json"]) if d.get("extras_json") else {}
     d["result"] = json.loads(d["result_json"]) if d.get("result_json") else {}
+    d["followups"] = json.loads(d["followups_json"]) if d.get("followups_json") else []
     return d
 
 
@@ -364,6 +366,7 @@ def create_request(
     extra: Optional[Dict[str, Any]] = None,
     silent: bool = False,
     canary: bool = False,
+    followups: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Insert a request. `canary` (decision only) marks the hourly end-to-end test card: extras_json gets
     "canary": true; Mando hides it and no DM is sent. `silent` (reports only) stores it as already posted: status «noted», dm_done=1 and no
@@ -420,14 +423,16 @@ def create_request(
     conn.execute(
         "INSERT INTO requests (id, kind, status, created_at, requester, title, context,"
         " draft_text, target_channel, target_thread_ts, options_json, expires_at,"
-        " requester_label, reply_to_ts, replaces, agent_where, email_cc, extras_json, dm_done, silent)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " requester_label, reply_to_ts, replaces, agent_where, email_cc, extras_json, dm_done, silent,"
+        " followups_json)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             rid, kind, "noted" if silent else "pending", created.strftime(fmt), requester, title, context,
             draft_text, target_channel, target_thread_ts,
             json.dumps(options) if options else None, expires.strftime(fmt),
             requester_label or None, reply_to_ts or None, replaces or None, agent_where or None,
             email_cc or None, extras_json, 1 if silent else 0, 1 if silent else 0,
+            json.dumps(followups, ensure_ascii=False) if followups else None,
         ),
     )
     return rid

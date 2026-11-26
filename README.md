@@ -47,6 +47,17 @@ agent -> polar CLI -> SQLite queue -> Polar app (Socket Mode)
 | `report` | An FYI card: what a session did, with links, optional file and follow-up buttons. | No approval needed. Follow-up buttons start new work. |
 | `agent` | A card that offers to open a new agent session for a message. | The owner starts the session. |
 
+### Scheduled follow-ups
+
+`polar report … --revisar "SPEC|what"` (repeat, max 3) asks the bus to hand `what` back to the session when SPEC is met
+(`30-nov 10:00`, `mañana 9:00`, `+3d 9:00`, `prod:<repo>#<n>`, `ci:<repo>#<n>`). Polar checks every item
+with `agent-bus followup add --dry-run` first and refuses the whole command with the bus's Spanish error (or «Falta la sesión.»
+when `--requester` has no session id). Then it adds them, creates the card (list stored in `requests.followups_json`) and runs
+`followup set-card`. The card shows «🗓 Revisaré …» lines with «Cancelar». Report cards and answered decision or questions
+cards also have the owner select «🗓 Revisar después» (never on a card that waits, a reply or email card, a prod-op card, or a card
+with no session id). The «prod» choice needs a PR link on the card; set `POLAR_GITHUB_ORG` to accept only PRs of one org.
+`AGENT_BUS_BIN` overrides the bus path. Code: `polar/followups.py`.
+
 Every approval card also has "Pedir cambios" (request changes). The owner types what to change.
 The agent then queues a new card with `--replaces <id>`.
 

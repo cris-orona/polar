@@ -7,6 +7,12 @@ OWNER = "U0000000000"
 
 
 @pytest.fixture(autouse=True)
+def _no_real_bus(monkeypatch, tmp_path_factory):
+    """A test never runs the real agent-bus. test_followups.py sets a fake one."""
+    monkeypatch.setenv("AGENT_BUS_BIN", str(tmp_path_factory.getbasetemp() / "no-agent-bus"))
+
+
+@pytest.fixture(autouse=True)
 def _no_real_alarm(monkeypatch):
     """A test never runs a real alarm command. test_alarm.py sets a fake one."""
     monkeypatch.delenv("POLAR_ALARM_BIN", raising=False)

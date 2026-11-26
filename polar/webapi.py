@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from polar import alarm, blocks, db
+from polar import alarm, blocks, db, followups
 from polar.core import Polar
 
 log = logging.getLogger("polar")
@@ -127,6 +127,8 @@ def perform(polar: Polar, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     req = db.get(polar.conn, rid)
     if not req:
         return 409, {"ok": False, "error": "No existe esa tarjeta."}
+    if action in ("later", "fu_cancel"):
+        return _followup_action(polar, req, action, body)
     try:
         _run(polar, req, action, body)
     except ActionError as exc:
@@ -139,6 +141,21 @@ def perform(polar: Polar, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         # The post was tried and Slack or Gmail refused it. The card shows «Falló», as in Slack.
         return 502, {"ok": False, "status": after, "error": "No se pudo enviar. Revisa la tarjeta."}
     return 200, {"ok": True, "status": after}
+
+
+def _followup_action(polar: Polar, req: Dict[str, Any], action: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    """`later` and `fu_cancel` do not change the card status, so they skip the «status did not change» check."""
+    try:
+        if action == "later":
+            data = polar.later(req["id"], body.get("when"))
+        else:
+            data = polar.fu_cancel(req["id"], body.get("fu"))
+    except followups.FollowupError as exc:
+        out: Dict[str, Any] = {"ok": False, "error": exc.error}
+        if exc.code == 409:
+            out["status"] = _status(polar, req["id"])
+        return exc.code, out
+    return 200, {"ok": True, "followup": data}
 
 
 GATED = ("send", "prod")  # actions with an effect outside this machine

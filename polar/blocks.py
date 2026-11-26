@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from polar import db
+from polar import db, followups
 
 # Workspace URL for message permalinks, e.g. https://myteam.slack.com (POLAR_SLACK_URL).
 SLACK_URL = (os.environ.get("POLAR_SLACK_URL") or "https://example.slack.com").rstrip("/")
@@ -286,6 +286,30 @@ def report_buttons(req: Dict[str, Any]) -> List[Dict[str, Any]]:
     return els  # at most 11 elements; Slack allows 25
 
 
+def followup_blocks(req: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """One line for each scheduled follow-up; «Cancelar» while it is open."""
+    out: List[Dict[str, Any]] = []
+    for item in req.get("followups") or []:
+        blk: Dict[str, Any] = {"type": "section", "text": {"type": "mrkdwn", "text": clip(followups.line(item), 600)}}
+        if item.get("state", "open") == "open":
+            blk["accessory"] = {"type": "button", "action_id": "polar_fu_cancel",
+                                "value": "%s:%s" % (req["id"], item["id"]),
+                                "text": {"type": "plain_text", "text": "Cancelar"}}
+        out.append(blk)
+    return out
+
+
+def later_blocks(req: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The owner's «Revisar después» select, only where `followups.can_later` allows it."""
+    if not followups.can_later(req):
+        return []
+    opts = [{"text": {"type": "plain_text", "text": label}, "value": "%s:%s" % (req["id"], key)}
+            for key, label in followups.later_options(req)]
+    return [{"type": "actions", "block_id": "polar_later_" + req["id"], "elements": [{
+        "type": "static_select", "action_id": "polar_later", "options": opts,
+        "placeholder": {"type": "plain_text", "text": "🗓 Revisar después"}}]}]
+
+
 def next_block_id(rid: str) -> str:
     return "polar_nextsel:" + rid
 
@@ -355,8 +379,8 @@ def request_blocks(req: Dict[str, Any], hint: Optional[str] = None) -> List[Dict
     rid = req["id"]
     if req["kind"] == "report":
         sel = next_select(req)
-        return blocks + ([sel] if sel else []) + [
-            {"type": "actions", "block_id": "polar_actions", "elements": report_buttons(req)}]
+        return blocks + followup_blocks(req) + ([sel] if sel else []) + [
+            {"type": "actions", "block_id": "polar_actions", "elements": report_buttons(req)}] + later_blocks(req)
     if req["kind"] in db.REPLY_KINDS:
         elements = [
             {"type": "button", "style": "primary", "action_id": "polar_send", "value": rid,
@@ -450,7 +474,8 @@ def resolved_blocks(req: Dict[str, Any]) -> List[Dict[str, Any]]:
         return [{"type": "section", "text": {"type": "mrkdwn", "text": clip(result_line(req))},
                  "accessory": {"type": "button", "action_id": "polar_reopen", "value": req["id"],
                                "text": {"type": "plain_text", "text": "Reabrir"}}}]
-    return [{"type": "section", "text": {"type": "mrkdwn", "text": clip(result_line(req))}}]
+    return ([{"type": "section", "text": {"type": "mrkdwn", "text": clip(result_line(req))}}]
+            + followup_blocks(req) + later_blocks(req))
 
 
 def pending_age(created: str, now: datetime) -> str:

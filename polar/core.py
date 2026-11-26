@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from polar import alarm, blocks, db
+from polar import alarm, blocks, db, followups
 from polar.tasks import OK_SUBTYPES, OWNER_DM, Tasks, _epoch, card_has_reader
 
 log = logging.getLogger("polar")
@@ -917,6 +917,57 @@ class Polar:
         texts = [steps[i] for i in picked]
         text = texts[0] if len(texts) == 1 else " ".join("%d) %s" % (n, t) for n, t in enumerate(texts, 1))
         self._to_revise(rid, text, via="next", src=src, extra={"indexes": picked, "steps": texts})
+
+    # -- scheduled follow-ups ------------------------------------------------
+    def later(self, rid: str, key: Any) -> Dict[str, Any]:
+        """«Revisar después»: schedule a follow-up for this card and redraw it. Return the bus JSON.
+        Raise followups.FollowupError (Spanish text, HTTP code)."""
+        req = db.get(self.conn, rid)
+        if not req:
+            raise followups.FollowupError("No existe esa tarjeta.", 409)
+        data = followups.add_later(self.conn, req, key)
+        self.refresh_dm(rid)
+        return data
+
+    def fu_cancel(self, rid: str, fu: Any) -> Dict[str, Any]:
+        """Cancel one follow-up of the card with the bus and redraw the card. Raise followups.FollowupError."""
+        req = db.get(self.conn, rid)
+        if not req:
+            raise followups.FollowupError("No existe esa tarjeta.", 409)
+        data = followups.cancel_followup(self.conn, req, fu)
+        self.refresh_dm(rid)
+        return data
+
+    def _tell_owner(self, rid: str, text: str) -> None:
+        req = db.get(self.conn, rid)
+        if not req or not req.get("dm_channel"):
+            return
+        try:
+            self.bot.chat_postEphemeral(channel=req["dm_channel"], user=self.owner_id, text=text)
+        except Exception as exc:
+            log.error("follow-up notice failed for %s: %s", rid, error_code(exc))
+
+    def on_later(self, user_id: str, value: str) -> None:
+        """Slack select «Revisar después». `value` is «<card id>:<key>»."""
+        if not self.is_owner(user_id):
+            return
+        rid, _, key = (value or "").partition(":")
+        try:
+            self.later(rid, key)
+        except followups.FollowupError as exc:
+            self._tell_owner(rid, exc.error)
+
+    def on_fu_cancel(self, user_id: str, value: str) -> None:
+        """Slack «Cancelar» of a follow-up line. `value` is «<card id>:<follow-up id>»."""
+        if not self.is_owner(user_id):
+            return
+        rid, _, fu = (value or "").partition(":")
+        try:
+            self.fu_cancel(rid, int(fu))
+        except ValueError:
+            return
+        except followups.FollowupError as exc:
+            self._tell_owner(rid, exc.error)
 
     def on_next_go(self, user_id: str, rid: str, state: Dict[str, Any]) -> None:
         """«Empezar marcados» on a card with 2 or 3 follow-ups: start the ones that are checked."""

@@ -75,6 +75,16 @@ def register(app: Any, polar: Polar) -> None:
         ack()
         polar.on_next(uid(body), rid(body), int(body["actions"][0]["action_id"].split(":", 1)[1]))
 
+    @app.action("polar_later")
+    def _later(ack, body):
+        ack()
+        polar.on_later(uid(body), (body["actions"][0].get("selected_option") or {}).get("value", ""))
+
+    @app.action("polar_fu_cancel")
+    def _fu_cancel(ack, body):
+        ack()
+        polar.on_fu_cancel(uid(body), rid(body))
+
     @app.action("polar_next_check")
     def _next_check(ack):
         ack()  # a toggle needs no redraw; the state is read when the start button is pressed
