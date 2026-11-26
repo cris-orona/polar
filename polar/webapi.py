@@ -74,7 +74,7 @@ def new_task(polar: Polar, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     head = polar.tasks.say(OWNER_DM, None, "🖥️ Desde Mando: %s" % clip_title(text))
     if not head:
         return 502, {"ok": False, "error": "Slack no tomó el aviso; la tarea no se creó."}
-    tid = polar.tasks.create_task(OWNER_DM, head, "web:" + head, text)
+    tid = polar.tasks.create_task(OWNER_DM, head, "web:" + head, text, intake=True)
     if not tid:
         return 409, {"ok": False, "error": "Esa tarea ya existe."}
     polar.tasks.say(OWNER_DM, head, polar.tasks.received("🧭 Recibido desde Mando."))

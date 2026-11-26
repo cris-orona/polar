@@ -41,10 +41,14 @@ MAX_CARD_QUOTE = 1500
 RELAY_POLL = 20.0            # seconds: the laptop relay (server-tasks, run by slack-watch) polls `polar steers`
 STEER_EXPIRE = 24 * 3600     # a steer that nobody took in this time is stale: no message
 SLOT_GRACE = 300             # seconds a new task-* tmux session holds a slot before the bus knows it
+BUS_QUICK_TIMEOUT = 10      # seconds for a bus read (owners, session, lineage): a failure falls back
 BUS_TIMEOUT = 120            # seconds for `agent-bus deliver` (it may resume a session)
 SENDING_STALE = 600          # a steer claimed this long ago and never finished: tell the owner
 NO_REPORT_TEXT = "✅ Terminó · sin informe todavía"
 ROUTER_HAS_IT = "↪️ La sesión no tiene una pantalla abierta. Se lo pasé al router para que la encuentre."
+PERMALINK = re.compile(r"https://[\w.-]+\.slack\.com/archives/([A-Z][A-Z0-9]+)/p(\d{16})(\?[^\s>|)]*)?")
+THREAD_TS_PARAM = re.compile(r"[?&]thread_ts=(\d+\.\d+)")
+OWNER_REASON = "dueño del hilo"
 SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
@@ -374,8 +378,67 @@ class Tasks:
             return None  # the same Slack event came twice
         return tid
 
+    @staticmethod
+    def thread_refs(text: str, channel: str = "", own_thread: Optional[str] = None) -> List[str]:
+        """Slack thread refs «<channel>:<ts>» in `text`: each permalink (a `thread_ts=` parameter wins over the
+        message ts), then the thread of the message itself when it has one."""
+        refs: List[str] = []
+        for m in PERMALINK.finditer(text or ""):
+            digits = m.group(2)
+            tp = THREAD_TS_PARAM.search(m.group(3) or "")
+            ref = "%s:%s" % (m.group(1), tp.group(1) if tp else "%s.%s" % (digits[:10], digits[10:]))
+            if ref not in refs:
+                refs.append(ref)
+        if own_thread and channel:
+            ref = "%s:%s" % (channel, own_thread)
+            if ref not in refs:
+                refs.append(ref)
+        return refs[:4]
+
+    def bus_json(self, *args: str) -> Any:
+        """`agent-bus <args>` as parsed JSON, or None on any failure or timeout."""
+        rc, out = self.sh([self.bus_bin(), *args], BUS_QUICK_TIMEOUT)
+        if rc != 0 or not (out or "").strip():
+            return None
+        try:
+            return json.loads(out)
+        except ValueError:
+            return None
+
+    def thread_owner(self, refs: List[str]) -> Optional[Tuple[str, str]]:
+        """The first owner session of one of the thread refs that is live or parked: (session id, label).
+        Closed owners and every bus failure give None (normal triage)."""
+        for ref in refs:
+            owners = self.bus_json("owners", "thread", ref)
+            if not isinstance(owners, list):
+                continue
+            for o in owners[:3]:
+                sid = o if isinstance(o, str) else (o.get("session") or o.get("session_id") or o.get("id")
+                                                    if isinstance(o, dict) else None)
+                if not sid or not re.fullmatch(r"[\w-]{4,64}", str(sid)):
+                    continue
+                row = self.bus_json("session", str(sid))
+                if isinstance(row, dict) and row.get("state") in ("live", "parked"):
+                    label = row.get("title") or row.get("tmux") or str(sid)[:8]
+                    return str(sid), str(label)
+        return None
+
     def create_task(self, channel: str, thread_ts: str, msg_ts: Optional[str], text: str,
-                    where: str = DEFAULT_WHERE) -> Optional[str]:
+                    where: str = DEFAULT_WHERE, intake: bool = False,
+                    own_thread: Optional[str] = None) -> Optional[str]:
+        """A new task. `intake` is a task that the owner wrote (DM or web): a Slack thread in it that a live or
+        parked session owns sends the task straight to that session (no triage)."""
+        if intake and self.triage_on():
+            try:
+                found = self.thread_owner(self.thread_refs(text, channel, own_thread))
+            except Exception:
+                log.exception("thread owner lookup failed")
+                found = None
+            if found:
+                return self._insert("task", "matched", clip_title(text), text, channel, thread_ts, msg_ts,
+                                    match_session=found[0], match_label=found[1][:80], match_reason=OWNER_REASON,
+                                    match_conf="high",
+                                    where_hint=where if where in WHERE_VALUES else DEFAULT_WHERE)
         return self._insert("task", "triage" if self.triage_on() else "queued", clip_title(text), text, channel,
                             thread_ts, msg_ts, where_hint=where if where in WHERE_VALUES else DEFAULT_WHERE)
 
@@ -506,7 +569,7 @@ class Tasks:
         if items:
             self._post_pick(channel, ts, items)
             return
-        tid = self.create_task(channel, ts, ts, with_note(text, note))
+        tid = self.create_task(channel, ts, ts, with_note(text, note), intake=True, own_thread=thread)
         if tid:
             self.status_line(tid, self.received("🧭 Recibido%s." % seen))
 
