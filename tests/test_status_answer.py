@@ -112,6 +112,24 @@ def test_still_a_status_question(text):
     assert is_status_question(text)
 
 
+@pytest.mark.parametrize("text", [
+    "How’s the CI speedup doing?", "how's coppel?", "where are we with the payments?", "any update on Logros?",
+    "qué tal va lo de Dalia?", "cómo anda el onboarding de Coppel", "status on the release", "cómo quedó el deploy",
+    "en qué vamos con la ontología", "how's the deploy going?"])
+def test_wider_status_words(text):
+    """The owner writes in English and Spanish: 2 of 198 of his texts matched the first words (11-24 to 11-25)."""
+    assert is_status_question(text)
+
+
+@pytest.mark.parametrize("text", [
+    "how's the CI? fix it", "how's the PR, merge it", "where are we with Coppel? send them the list",
+    "how's it going to work with fleets?", "qué tal va el CI? arréglalo", "any update on Logros? write the doc",
+    "Where's that? How's that doing? Does the flete independiente get redirected?",
+    "cómo vamos con la ontología? ¿qué más deberíamos de empujar?"])
+def test_wider_words_keep_work_out(text):
+    assert not is_status_question(text)
+
+
 def test_crash_after_done_cannot_retriage(tk, sh, monkeypatch):
     tk.on_message(msg("cómo va el CI"))
     tid = tk.rows("task")[0]["id"]

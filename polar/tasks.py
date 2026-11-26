@@ -56,20 +56,25 @@ STATUS_MAX_CHARS = 300       # a longer text is a task, not a status question
 STATUS_FOLLOW_UP = "Pregúntale a la sesión"
 STATUS_REQUESTER = "status-answer"
 STATUS_RE = re.compile(
-    r"c[oó]mo\s+(?:va|vamos|van)\b|en\s+qu[eé]\s+(?:va|qued[oó])\b|qu[eé]\s+pas[oó]\s+con\b"
-    r"|\bstatus\s+(?:de|del|of)\b|\bavance\s+(?:de|del)\b|\bhow\s+is\b", re.I)
-STATUS_FUTURE_RE = re.compile(r"c[oó]mo\s+(?:va|vamos|van)\s+a\b", re.I)  # «cómo vamos a hacer»: a plan, not a status
+    r"c[oó]mo\s+(?:va|vamos|van|anda|andamos|andan)\b|en\s+qu[eé]\s+(?:va|vamos|qued[oó])\b"
+    r"|qu[eé]\s+pas[oó]\s+con\b|qu[eé]\s+tal\s+(?:va|van|vamos)\b|c[oó]mo\s+qued[oó]\b"
+    r"|\bstatus\s+(?:de|del|of|on)\b|\bavance\s+(?:de|del)\b|\bhow\s+is\b|\bhow['’]?s\b"
+    r"|\bwhere\s+are\s+we\s+(?:with|on|at)\b|\bany\s+(?:news|updates?)\s+(?:on|about)\b", re.I)
+STATUS_FUTURE_RE = re.compile(r"c[oó]mo\s+(?:va|vamos|van)\s+a\b|\bgoing\s+to\b", re.I)  # «cómo vamos a hacer»: a plan, not a status
 STATUS_WORK_RE = re.compile(
     r"\b(?:haz|hazlo|hazla|implementa|impl[eé]mentalo|impl[eé]mentala|crea|cr[eé]alo|arregla|arr[eé]glalo|construye|"
     r"constr[uú]yelo|manda|m[aá]ndalo|env[ií]a|env[ií]alo|corre|c[oó]rrelo|sube|s[uú]belo|cambia|c[aá]mbialo|"
     r"agrega|ag[rr]egalo|quita|qu[ií]talo|borra|b[oó]rralo|prepara|prep[aá]ralo|revisa|rev[ií]salo|"
-    r"escribe|ejecuta|despliega|publica|actualiza|migra|elimina|a[nñ]ade)\b", re.I)
+    r"escribe|ejecuta|despliega|publica|actualiza|migra|elimina|a[nñ]ade|"
+    r"implement|ship|delete|remove|create|send|write|add|make|"
+    r"(?:fix|build|deploy|merge|change|update|run)\s+(?:it|this|that|them))\b", re.I)  # noun-like verbs only with an object
 
 
 def is_status_question(text: str) -> bool:
-    """A short text that asks how something stands. Polar answers it from the bus and Polar facts, no session."""
+    """A short text that asks how something stands. Polar answers it from the bus and Polar facts, no session.
+    One question only: a text with more questions («How's that doing? Does X redirect to Y?») needs a session."""
     t = (text or "").strip()
-    return (0 < len(t) < STATUS_MAX_CHARS and bool(STATUS_RE.search(t))
+    return (0 < len(t) < STATUS_MAX_CHARS and t.count("?") <= 1 and bool(STATUS_RE.search(t))
             and not STATUS_FUTURE_RE.search(t) and not STATUS_WORK_RE.search(t))
 SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
