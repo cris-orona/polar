@@ -12,7 +12,7 @@ def test_button_on_decision_bound_to_first_option(polar, decision_id):
     req = db.get(polar.conn, decision_id)
     assert "polar_choose_go:go" in _buttons(req)
     btn = [e for e in blocks.request_blocks(req)[-1]["elements"] if e["action_id"].startswith("polar_choose_go")][0]
-    assert btn["text"]["text"] == "Sí, y sigue"
+    assert btn["text"]["text"] == "Go y sigue"
 
 
 def test_no_button_for_prod_op_or_other_kinds(polar, conn):
@@ -51,3 +51,15 @@ def test_web_choose_flag(web, polar, decision_id):  # noqa: F811
     shown(polar, decision_id)
     assert act(web, decision_id, "choose", option="go", and_continue=True)[0] == 200
     assert db.get(polar.conn, decision_id)["and_continue"] == 1
+
+
+def test_recommended_option_and_label():
+    req = {"kind": "decision", "options": [{"key": "a", "label": "Esperar"},
+                                           {"key": "b", "label": "Hacerlo ahora con el plan completo de tres pasos (Recomendado)."}]}
+    assert blocks.continue_option(req)["key"] == "b"
+    lab = blocks.continue_label(blocks.continue_option(req))
+    assert len(lab) <= 32 and lab.endswith("… y sigue") and "ecomendad" not in lab
+    assert blocks.continue_label({"label": "Go (recomendado)."}) == "Go y sigue"
+    assert blocks.continue_label({"label": "Plan RECOMENDADO"}) == "Plan y sigue"
+    req["options"][1]["label"] = "Dos"
+    assert blocks.continue_option(req)["key"] == "a"

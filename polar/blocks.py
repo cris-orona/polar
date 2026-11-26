@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -315,9 +316,33 @@ def next_checked(state: Dict[str, Any], rid: str) -> List[int]:
 CONTINUE_LABEL = "Sí, y sigue"
 
 
+CONTINUE_MAX = 32
+_RECOMMENDED = re.compile(r"\s*\(?\s*recomendad[oa]\s*\)?", re.I)
+
+
+def continue_option(req: Dict[str, Any]) -> Dict[str, Any]:
+    """The option «y sigue» binds to: the first whose label has «recomendado» (any case, with or without
+    parentheses), else the first option. Mando uses the same rule."""
+    opts = req.get("options") or []
+    for o in opts:
+        if re.search(r"recomendad[oa]", o.get("label") or "", re.I):
+            return o
+    return opts[0]
+
+
+def continue_label(opt: Dict[str, Any]) -> str:
+    """«<option label> y sigue» in at most CONTINUE_MAX characters: «(recomendado)» and a trailing period go."""
+    base = _RECOMMENDED.sub("", opt.get("label") or "").strip().rstrip(".").strip()
+    suffix = " y sigue"
+    room = CONTINUE_MAX - len(suffix)
+    if len(base) > room:
+        base = base[:room - 1].rstrip() + "…"
+    return (base or "Sí") + suffix
+
+
 def can_continue(req: Dict[str, Any]) -> bool:
-    """«Sí, y sigue» is offered on a decision card, never on a prod-op step. It is bound to the first option
-    (a decision card has no recommended option)."""
+    """«Sí, y sigue» is offered on a decision card, never on a prod-op step. It is bound to the option that
+    `continue_option` picks."""
     return (req.get("kind") == "decision" and bool(req.get("options"))
             and not (req.get("requester") or "").startswith("prod-op"))
 
@@ -348,8 +373,9 @@ def request_blocks(req: Dict[str, Any], hint: Optional[str] = None) -> List[Dict
             for o in req["options"]
         ]
         if can_continue(req):
-            elements.append({"type": "button", "action_id": "polar_choose_go:" + req["options"][0]["key"],
-                             "value": rid, "text": {"type": "plain_text", "text": CONTINUE_LABEL}})
+            opt = continue_option(req)
+            elements.append({"type": "button", "action_id": "polar_choose_go:" + opt["key"],
+                             "value": rid, "text": {"type": "plain_text", "text": continue_label(opt)}})
     elements.append(revise_button(rid))
     blocks.append({"type": "actions", "block_id": "polar_actions", "elements": elements})
     return blocks
