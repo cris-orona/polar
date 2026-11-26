@@ -5,6 +5,8 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
+import time
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -444,6 +446,57 @@ def revise_open_since() -> str:
     return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+LINEAGE_TTL = 60.0       # seconds a lineage answer is kept
+LINEAGE_FAIL_TTL = 20.0  # seconds a failed lookup is kept (the old rule runs meanwhile)
+LINEAGE_TIMEOUT = 5      # seconds for `agent-bus lineage`
+_lineage_cache: Dict[str, Any] = {}
+
+
+def lineage(sid: str) -> List[str]:
+    """`agent-bus lineage <sid>`: the session id first, then every successor (handoff or fresh wake), oldest first.
+    A failure, a timeout or a bad answer gives [sid] (today's same-session rule). Kept for LINEAGE_TTL seconds."""
+    now = time.time()
+    hit = _lineage_cache.get(sid)
+    if hit and hit[0] > now:
+        return list(hit[1])
+    result, ttl = [sid], LINEAGE_FAIL_TTL
+    try:
+        bus = os.environ.get("AGENT_BUS_BIN") or str(Path.home() / ".local/bin/agent-bus")
+        out = subprocess.run([bus, "lineage", sid], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                             timeout=LINEAGE_TIMEOUT)
+        data = json.loads(out.stdout) if out.returncode == 0 else None
+        if isinstance(data, list) and data and all(isinstance(x, str) for x in data):
+            result, ttl = [sid] + [x for x in data if x != sid], LINEAGE_TTL
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    _lineage_cache[sid] = (now + ttl, result)
+    return list(result)
+
+
+def _first_word(who: Optional[str]) -> str:
+    parts = (who or "").split()
+    return parts[0] if parts else ""
+
+
+def answered_by_lineage(conn: Any, req: Dict[str, Any]) -> bool:
+    """True when a `revise` card was answered by a successor of its session (a handoff or a fresh wake has a new
+    session id, so the same-session rule of `list_requests` never sees its card). A later card from any session of
+    the lineage counts; for a follow-up (`via` = next) a later silent card counts too."""
+    sid = _first_word(req.get("requester"))
+    if not SESSION_ID_RE.match(sid) or not req.get("decided_at"):
+        return False
+    chain = lineage(sid)
+    follow = (req.get("result") or {}).get("via") == "next"
+    for n in conn.execute("SELECT requester, silent FROM requests WHERE created_at>? AND id<>?"
+                          " AND COALESCE(requester,'')<>''", (req["decided_at"], req["id"])).fetchall():
+        who = _first_word(n["requester"])
+        if who in chain[1:] and (follow or not n["silent"]):
+            return True
+        if who == sid and follow and n["silent"]:
+            return True
+    return False
+
+
 def list_requests(
     conn: sqlite3.Connection, status: str = "all", since: Optional[str] = None
 ) -> List[Dict[str, Any]]:
@@ -468,7 +521,10 @@ def list_requests(
         sql += " AND created_at>=?"
         args.append(since)
     sql += " ORDER BY created_at, rowid"
-    return [_row(r) for r in conn.execute(sql, args).fetchall()]  # type: ignore[misc]
+    rows = [_row(r) for r in conn.execute(sql, args).fetchall()]
+    if status == "open":
+        rows = [r for r in rows if not (r and r["status"] == "revise" and answered_by_lineage(conn, r))]
+    return rows  # type: ignore[return-value]
 
 
 def transition(
