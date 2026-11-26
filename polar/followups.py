@@ -122,7 +122,7 @@ def can_later(req: Dict[str, Any]) -> bool:
         return False
     kind, status = req.get("kind"), req.get("status")
     if kind == "report":
-        return status in ("pending", "shown", "noted")
+        return status != "replaced"  # read, folded or followed up: the owner can still ask for a later review
     if kind == "decision":
         return status == "chosen"
     if kind == "questions":
@@ -190,7 +190,8 @@ def cancel_followup(conn: Any, req: Dict[str, Any], fu: Any) -> Dict[str, Any]:
     if data.get("error"):
         raise FollowupError(str(data["error"]), 422)
     state = data.get("state")
-    new = "cancelled" if data.get("cancelled") else ("delivered" if state == "delivered" else None)
+    new = ("cancelled" if data.get("cancelled") or state in ("cancelled", "expired")
+           else "delivered" if state == "delivered" else None)
     if new:
         for i in items:
             if i["id"] == fu:

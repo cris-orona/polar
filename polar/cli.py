@@ -602,16 +602,19 @@ def _report_with_followups(args: argparse.Namespace, text: str, report: Dict[str
         if check.get("error"):
             raise ValueError(str(check["error"]))
     added: List[Dict[str, Any]] = []
+    created: List[int] = []  # new rows only: a duplicate is an older follow-up that another card may show
 
     def undo() -> None:
-        for e in added:
-            fu.cancel(e["id"], by="session")
+        for fid in created:
+            fu.cancel(fid, by="session")
 
     for spec, what in items:
         data = fu.add(spec, sid, "session", args.title, text=what)
         if data.get("error") or data.get("id") is None:
             undo()
             raise ValueError(str(data.get("error") or fu.BUS_DOWN))
+        if not data.get("duplicate"):
+            created.append(data["id"])
         added.append(fu.entry(dict(data, text=data.get("text") or what)))
     try:
         rid = db.create_request(

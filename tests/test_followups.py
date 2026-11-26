@@ -328,3 +328,24 @@ def web(polar, monkeypatch):
     yield server
     server.shutdown()
     server.server_close()
+
+
+def test_revisar_rollback_keeps_an_older_duplicate(fakebus, tmp_path, capsys, monkeypatch):
+    """A duplicate is an older follow-up that another card may show: a failed add must not cancel it."""
+    seq = iter([{"id": 7, "phrase": "el 30-nov 10:00", "text": "a", "by": "session", "duplicate": True},
+                {"error": "Esta sesión ya tiene 3 revisiones programadas (máximo 3)."}])
+
+    def fake_add(spec, session, by, title, text="", card="", dry_run=False):
+        return {"phrase": "x", "duplicate": False} if dry_run else next(seq)
+    monkeypatch.setattr(followups, "add", fake_add)
+    code, out = run_cli(tmp_path, capsys, "--revisar", "30-nov 10:00|a", "--revisar", "+3h|b")
+    assert code == 2 and "máximo 3" in out["error"]
+    assert not [c for c in fakebus.calls() if c[1] == "cancel"]
+
+
+def test_later_on_old_reports_but_not_replaced(fakebus):
+    conn = db.connect()
+    rid = report(conn)
+    for status, ok in (("pending", True), ("noted", True), ("filed", True), ("chosen", True), ("replaced", False)):
+        conn.execute("UPDATE requests SET status=? WHERE id=?", (status, rid))
+        assert followups.can_later(db.get(conn, rid)) is ok, status
