@@ -964,7 +964,7 @@ class Polar:
         if not req or card_has_reader(req):
             return
         try:
-            if self.tasks.orphan_card(req, text) and req.get("dm_ts"):  # no dm_ts: orphan_card posted the notice
+            if self.tasks.orphan_card(req, text) and req.get("dm_ts") and self.tasks.notices_on():  # no dm_ts: orphan_card posted the notice
                 self.tasks.say(req.get("dm_channel") or OWNER_DM, req.get("dm_ts"),
                                self.tasks.orphan_said(req))
         except Exception:
@@ -994,11 +994,16 @@ class Polar:
             if key == "agent" and req.get("agent_where"):
                 # The shown->chosen step wins once, so a second click makes no second task.
                 channel, thread = req.get("dm_channel") or OWNER_DM, req.get("dm_ts")
-                if not thread:  # web mode: the notice that starts the task is the thread root
-                    thread = self.tasks.say(channel, None, "🧭 Abro un agente: %s" % blocks.clip(req["title"], 100))
-                if thread:
+                msg_ts = None
+                if not thread:
+                    if self.tasks.notices_on():  # web mode: the notice that starts the task is the thread root
+                        thread = self.tasks.say(channel, None, "🧭 Abro un agente: %s" % blocks.clip(req["title"], 100))
+                    else:  # quiet mode: no notice, so no thread
+                        thread, msg_ts = "", "agent:" + rid
+                if thread or msg_ts:
                     self.tasks.create_agent_task(channel, thread,
-                                                 req["draft_text"] or req["title"], req["agent_where"])
+                                                 req["draft_text"] or req["title"], req["agent_where"],
+                                                 msg_ts=msg_ts)
             self.refresh_dm(rid)
         else:
             self._stale(rid, src)

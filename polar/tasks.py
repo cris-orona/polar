@@ -121,6 +121,13 @@ ANSWER_RULE = ("To answer the owner's question, use `polar report --thread {thre
 
 RESUME_PROMPT = ("El dueño pidió reanudar desde Polar. Retoma donde quedaste y termina con polar report. "
                  + ANSWER_RULE.format(thread="<thread>", channel="<channel>"))
+NO_THREAD_ARG = re.compile(r"--thread\s+(?=--)")
+
+
+def fill_thread(template: str, thread: Optional[str], **kw: Any) -> str:
+    """Format a brief that holds `--thread {thread} `. A task with no Slack thread gets no `--thread` flag."""
+    out = template.format(thread=thread or "", **kw)
+    return out if thread else NO_THREAD_ARG.sub("", out)
 
 
 def task_model(text: str = "") -> str:
@@ -302,6 +309,16 @@ class Tasks:
         return Path(os.environ.get("POLAR_PARKED_DIR")
                     or Path.home() / ".local/state/agent-bus/parked").expanduser()
 
+    def notices_on(self) -> bool:
+        """True when Polar posts a Slack notice for each task (head, status line, «Terminó»). Env POLAR_TASK_NOTICES
+        on/off wins. Unset: off in web delivery (Mando and the report card carry the task), on otherwise."""
+        v = (os.environ.get("POLAR_TASK_NOTICES") or "").strip().lower()
+        if v in ("on", "1", "yes", "true"):
+            return True
+        if v in ("off", "0", "no", "false"):
+            return False
+        return (os.environ.get("POLAR_DELIVERY") or "dm").strip().lower() != "web"
+
     # -- Slack helpers -----------------------------------------------------
     def say(self, channel: str, thread_ts: Optional[str], text: str,
             blocks_: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
@@ -323,6 +340,10 @@ class Tasks:
         t = self.get(tid) if tid else None
         if not t:
             return False
+        if not self.notices_on():
+            if t.get("status_text") != text:
+                self.update(tid, status_text=text)  # keep the state; post and edit nothing
+            return True
         if t.get("status_ts") and t.get("status_text") == text:
             return True
         bl = blocks_ or [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
@@ -521,11 +542,13 @@ class Tasks:
             body = answer + (("\n\nFuentes: " + ", ".join(sources)) if sources else "")
             db.create_request(self.conn, "report", "Estado: " + clip_title(t["text"])[:50], "Pregunta: " + t["text"][:250],
                               STATUS_REQUESTER, draft_text=body,
-                              target_channel=t["channel"], target_thread_ts=t["thread_ts"],
+                              target_channel=t["channel"], target_thread_ts=t["thread_ts"] or None,
                               report={"next": [STATUS_FOLLOW_UP]})
         except Exception:
             log.exception("status card of task %s not stored", tid)
-        if (os.environ.get("POLAR_DELIVERY") or "dm").strip().lower() == "web":  # the web is the only channel for the card: the thread post is the Slack copy.
+        if (os.environ.get("POLAR_DELIVERY") or "dm").strip().lower() == "web" and (t["thread_ts"] or self.notices_on()):
+            # The web is the only channel for the card: the thread post is the Slack copy. A task with no thread
+            # (Mando, quiet mode) posts nothing: the report card is the answer.
             self.say(t["channel"], t["thread_ts"], answer[:3500])  # In dm mode the card shows in the thread.
         self.status_line(tid, "✅ Te respondí con el estado actual, sin abrir una sesión. "
                               "Si falta algo, escribe aquí y lo paso a la sesión.")
@@ -559,9 +582,10 @@ class Tasks:
                             where_hint="laptop-only", requester=requester or None)
 
     def create_agent_task(self, channel: str, thread_ts: str, text: str,
-                          where: str = DEFAULT_WHERE) -> Optional[str]:
-        """An «Abro un agente» card, owner chose yes. The router already found no owner: skip triage."""
-        return self._insert("task", "queued", clip_title(text), text, channel, thread_ts, thread_ts,
+                          where: str = DEFAULT_WHERE, msg_ts: Optional[str] = None) -> Optional[str]:
+        """An «Abro un agente» card, owner chose yes. The router already found no owner: skip triage.
+        `msg_ts` is needed when there is no thread (quiet mode): it keeps the task unique."""
+        return self._insert("task", "queued", clip_title(text), text, channel, thread_ts, msg_ts or thread_ts,
                             where_hint=where if where in WHERE_VALUES else DEFAULT_WHERE)
 
     def create_steer(self, channel: str, thread_ts: Optional[str], msg_ts: Optional[str], text: str,
@@ -575,15 +599,19 @@ class Tasks:
         Return the task id, or None when the card or the message already has its task."""
         channel, thread = req.get("dm_channel") or OWNER_DM, req.get("dm_ts") or ""
         text = text.strip()[:MAX_STEER_CHARS]
+        agent_ts = None
         if not thread:
-            # A silent report has no DM and so no thread: the notice that starts the task is the thread root.
-            thread = self.say(channel, None, self.orphan_said(req))
-            if not thread:
-                return None
+            if self.notices_on():
+                # A silent report has no DM and so no thread: the notice that starts the task is the thread root.
+                thread = self.say(channel, None, self.orphan_said(req))
+                if not thread:
+                    return None
+            else:
+                agent_ts = "card:" + req["id"]  # quiet mode: no notice, so the task has no thread
         if req.get("agent_where"):
             brief = req.get("draft_text") or req["title"]
             return self.create_agent_task(channel, thread, "%s\n\nInstrucción del dueño al abrir el agente: %s" % (
-                brief, text), req["agent_where"])
+                brief, text), req["agent_where"], msg_ts=agent_ts)
         said = "\n".join(x.strip() for x in (req.get("context"), req.get("draft_text")) if x and x.strip())
         who = (req.get("requester") or "").strip()
         body = ("Sobre la tarjeta «%s»: %s\n\n"
@@ -810,9 +838,11 @@ class Tasks:
         note, _ = self.attach(files.message_files(ev), ts)
         if note:
             text += "\n\n" + note
-        head = self.say(OWNER_DM, None, "🧭 Me etiquetaste: %s\n%s" % (clip_title(ask), link))
-        if not head:
-            return
+        head = ""  # quiet mode: no head, no thread; the text holds the link to the message
+        if self.notices_on():
+            head = self.say(OWNER_DM, None, "🧭 Me etiquetaste: %s\n%s" % (clip_title(ask), link))
+            if not head:
+                return
         tid = self.create_task(OWNER_DM, head, ts, text)
         if tid:
             self.status_line(tid, self.received("🧭 Recibido."))
@@ -832,7 +862,7 @@ class Tasks:
                 return  # not a card thread
             # No session would read it: the message starts a task (or the card's agent) in this thread.
             req = dict(req)
-            if self.orphan_card(req, text, msg_ts=ts):
+            if self.orphan_card(req, text, msg_ts=ts) and self.notices_on():
                 self.say(channel, thread, self.orphan_said(req))
             return
         who = real_requester(who)  # a prod-op card: the session after the op id
@@ -1103,7 +1133,8 @@ class Tasks:
         for t in self.rows("task", "triage"):
             if now - _epoch(t["created_at"]) >= self.triage_timeout():
                 self.update(t["id"], status="queued", queue_notified=0)
-                self.say(t["channel"], t["thread_ts"], "Sin respuesta de la laptop; abro sesión nueva.")
+                if self.notices_on():
+                    self.say(t["channel"], t["thread_ts"], "Sin respuesta de la laptop; abro sesión nueva.")
         for t in self.rows("task", "confirm"):
             if now - _epoch(t["updated_at"]) >= self.confirm_timeout():
                 self.update(t["id"], status="queued", queue_notified=0)
@@ -1111,7 +1142,8 @@ class Tasks:
 
     def _card_done(self, t: Dict[str, Any], text: str) -> None:
         if not t.get("card_ts"):
-            self.say(t["channel"], t["thread_ts"], text)
+            if self.notices_on():
+                self.say(t["channel"], t["thread_ts"], text)
             return
         try:
             self.bot.chat_update(channel=t["channel"], ts=t["card_ts"], text=text,
@@ -1243,10 +1275,10 @@ class Tasks:
         work.mkdir(parents=True, exist_ok=True)
         self.ensure_trust(work)
         sid = str(uuid.uuid4())
-        brief = BRIEF.format(id=t["id"], text=t["text"], thread=t["thread_ts"],
-                             channel=OWNER_DM, session=sid,
-                             polar_bin=POLAR_BIN, where=SERVER_NAME or "a headless server",
-                             extra_rules=_extra_rules())
+        brief = fill_thread(BRIEF, t["thread_ts"], id=t["id"], text=t["text"],
+                            channel=OWNER_DM, session=sid,
+                            polar_bin=POLAR_BIN, where=SERVER_NAME or "a headless server",
+                            extra_rules=_extra_rules())
         bdir = db.data_dir() / "briefs"
         bdir.mkdir(parents=True, exist_ok=True)
         bfile = bdir / (name + ".txt")

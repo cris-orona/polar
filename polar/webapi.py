@@ -10,6 +10,7 @@ import logging
 import os
 import secrets
 import threading
+import uuid
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -71,15 +72,20 @@ def new_task(polar: Polar, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     except ActionError as exc:
         return exc.code, {"ok": False, "error": exc.error}
     from polar.tasks import OWNER_DM, clip_title
-    head = polar.tasks.say(OWNER_DM, None, "🖥️ Desde Mando: %s" % clip_title(text))
-    if not head:
-        return 502, {"ok": False, "error": "Slack no tomó el aviso; la tarea no se creó."}
+    loud = polar.tasks.notices_on()
+    head, msg_ts = "", "web:" + uuid.uuid4().hex  # quiet mode: no notice, so no Slack thread
+    if loud:
+        head = polar.tasks.say(OWNER_DM, None, "🖥️ Desde Mando: %s" % clip_title(text))
+        if not head:
+            return 502, {"ok": False, "error": "Slack no tomó el aviso; la tarea no se creó."}
+        msg_ts = "web:" + head
     context = body.get("context")
     context = context[:6000] if isinstance(context, str) else ""
-    tid = polar.tasks.create_task(OWNER_DM, head, "web:" + head, text, intake=True, context=context)
+    tid = polar.tasks.create_task(OWNER_DM, head, msg_ts, text, intake=True, context=context)
     if not tid:
         return 409, {"ok": False, "error": "Esa tarea ya existe."}
-    polar.tasks.say(OWNER_DM, head, polar.tasks.received("🧭 Recibido desde Mando."))
+    if loud:
+        polar.tasks.say(OWNER_DM, head, polar.tasks.received("🧭 Recibido desde Mando."))
     return 200, {"ok": True, "status": "queued", "task": tid}
 
 
