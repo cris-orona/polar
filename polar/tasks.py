@@ -14,6 +14,7 @@ import shlex
 import shutil
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -49,6 +50,19 @@ ROUTER_HAS_IT = "↪️ La sesión no tiene una pantalla abierta. Se lo pasé al
 PERMALINK = re.compile(r"https://[\w.-]+\.slack\.com/archives/([A-Z][A-Z0-9]+)/p(\d{16})(\?[^\s>|)]*)?")
 THREAD_TS_PARAM = re.compile(r"[?&]thread_ts=(\d+\.\d+)")
 OWNER_REASON = "dueño del hilo"
+STATUS_TIMEOUT = 120         # seconds for `status-answer`
+STATUS_MAX_CHARS = 300       # a longer text is a task, not a status question
+STATUS_FOLLOW_UP = "Pregúntale a la sesión"
+STATUS_REQUESTER = "status-answer"
+STATUS_RE = re.compile(
+    r"c[oó]mo\s+(?:va|vamos|van)\b|en\s+qu[eé]\s+(?:va|qued[oó])\b|qu[eé]\s+pas[oó]\s+con\b"
+    r"|\bstatus\s+(?:de|del|of)\b|\bavance\s+(?:de|del)\b|\bhow\s+is\b", re.I)
+
+
+def is_status_question(text: str) -> bool:
+    """A short text that asks how something stands. Polar answers it from the bus and Polar facts, no session."""
+    t = (text or "").strip()
+    return 0 < len(t) < STATUS_MAX_CHARS and bool(STATUS_RE.search(t))
 SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
@@ -234,6 +248,8 @@ class Tasks:
         self._type_fails: Dict[str, int] = {}  # request id -> failed tries to type its answer
         self._catchup_at: Optional[float] = None          # last catch-up round; None: not run yet
         self._catchup_threads_at: Optional[float] = None  # last round that read threads
+        self.spawn: Callable[[Callable[[], Any]], Any] = lambda fn: threading.Thread(
+            target=fn, daemon=True).start()  # tests replace it
 
     # -- config ------------------------------------------------------------
     def max_tasks(self) -> int:
@@ -253,6 +269,12 @@ class Tasks:
 
     def laptop_grace(self) -> float:
         return env_float("POLAR_LAPTOP_GRACE", 120)
+
+    def status_answer_on(self) -> bool:
+        return os.environ.get("POLAR_STATUS_ANSWER", "on").strip().lower() != "off"
+
+    def status_bin(self) -> str:
+        return os.environ.get("STATUS_ANSWER_BIN") or str(Path.home() / ".local/bin/status-answer")
 
     def triage_on(self) -> bool:
         return os.environ.get("POLAR_TRIAGE", "1") != "0"
@@ -439,8 +461,50 @@ class Tasks:
                                     match_session=found[0], match_label=found[1][:80], match_reason=OWNER_REASON,
                                     match_conf="high",
                                     where_hint=where if where in WHERE_VALUES else DEFAULT_WHERE)
+        if intake and self.status_answer_on() and is_status_question(text):
+            tid = self._insert("task", "answering", clip_title(text), text, channel, thread_ts, msg_ts,
+                               where_hint=where if where in WHERE_VALUES else DEFAULT_WHERE)
+            if tid:
+                self.spawn(lambda: self.answer_status(tid))
+            return tid
         return self._insert("task", "triage" if self.triage_on() else "queued", clip_title(text), text, channel,
                             thread_ts, msg_ts, where_hint=where if where in WHERE_VALUES else DEFAULT_WHERE)
+
+    def _back_to_triage(self, tid: str) -> None:
+        self.update(tid, status="triage" if self.triage_on() else "queued", queue_notified=0)
+
+    def answer_status(self, tid: str) -> bool:
+        """Answer a status question with `status-answer` (no session). Exit 0: post the answer in the thread, store a
+        silent report card with one follow-up «Pregúntale a la sesión», close the task. Exit 3, a timeout or any error:
+        the task goes to normal triage and the owner reads nothing about it. Return True when answered."""
+        t = self.get(tid)
+        if not t or t["status"] != "answering":
+            return False
+        answer, sources = "", []
+        try:
+            rc, out = self.sh([self.status_bin(), "--json", "--", t["text"]], STATUS_TIMEOUT)
+            if rc == 0:
+                data = json.loads((out or "").strip().splitlines()[-1])
+                if isinstance(data, dict) and data.get("ok") and str(data.get("answer_md") or "").strip():
+                    answer = str(data["answer_md"]).strip()
+                    sources = [str(x) for x in (data.get("sources") or [])][:12]
+        except Exception as exc:
+            log.warning("status-answer failed for task %s: %s", tid, type(exc).__name__)
+        if not answer:
+            self._back_to_triage(tid)
+            return False
+        try:
+            body = answer + (("\n\nFuentes: " + ", ".join(sources)) if sources else "")
+            db.create_request(self.conn, "report", "Estado: " + clip_title(t["text"])[:50], "Pregunta: " + t["text"][:250],
+                              STATUS_REQUESTER, draft_text=body, silent=True,
+                              report={"next": [STATUS_FOLLOW_UP]})
+        except Exception:
+            log.exception("status card of task %s not stored", tid)
+        self.say(t["channel"], t["thread_ts"], answer[:3500])
+        self.update(tid, status="done", finished_at=db.now_iso())
+        self.status_line(tid, "✅ Te respondí con el estado actual, sin abrir una sesión. "
+                              "Si falta algo, escribe aquí y lo paso a la sesión.")
+        return True
 
     def create_handoff(self, title: str, text: str, requester: str) -> Optional[str]:
         """A server session hands one step to a new laptop session (browser, laptop-only MCP). Only the laptop
@@ -1008,6 +1072,9 @@ class Tasks:
 
     def expire_triage(self) -> None:
         now = time.time()
+        for t in self.rows("task", "answering"):  # the worker died: normal triage
+            if now - _epoch(t["created_at"]) >= STATUS_TIMEOUT + 30:
+                self._back_to_triage(t["id"])
         for t in self.rows("task", "triage"):
             if now - _epoch(t["created_at"]) >= self.triage_timeout():
                 self.update(t["id"], status="queued", queue_notified=0)
