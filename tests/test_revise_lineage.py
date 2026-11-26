@@ -81,3 +81,12 @@ def test_silent_card_counts_only_for_next(conn, monkeypatch):
     later(conn, NEW + " task-y", silent=True)
     open_ids = ids(conn)
     assert plain in open_ids and follow not in open_ids
+
+
+def test_one_failure_skips_lineage_for_the_rest_of_the_call(conn, monkeypatch):
+    calls = fake_bus(monkeypatch, fail=True)
+    revise(conn, requester=OLD + " task-x")
+    revise(conn, requester="cccccccc-3333-4333-8333-333333333333 task-x")
+    revise(conn, requester="dddddddd-4444-4444-8444-444444444444 task-x")
+    ids(conn)
+    assert len(calls) == 1

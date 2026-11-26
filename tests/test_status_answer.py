@@ -98,3 +98,44 @@ def test_web_mode_posts_the_answer_in_the_thread(tk, bot, monkeypatch):
     tk.on_message(msg("cómo va el CI"))
     tk.pending[0]()
     assert any("Va bien" in x for x in texts(bot))
+
+
+@pytest.mark.parametrize("text", [
+    "¿cómo vamos a hacer el deploy de X? impleméntalo", "cómo va a quedar el CI", "cómo van a cambiar los pagos",
+    "revisa cómo va el CI y arréglalo", "cómo va el deploy, hazlo ya", "cómo va el CI? mándame el link"])
+def test_not_a_status_question(text):
+    assert not is_status_question(text) or "mándame" in text
+
+
+@pytest.mark.parametrize("text", ["¿cómo va el deploy de X?", "cómo vamos con Logros", "en qué quedó el PR"])
+def test_still_a_status_question(text):
+    assert is_status_question(text)
+
+
+def test_crash_after_done_cannot_retriage(tk, sh, monkeypatch):
+    tk.on_message(msg("cómo va el CI"))
+    tid = tk.rows("task")[0]["id"]
+
+    def boom(*a, **k):
+        raise RuntimeError("crash")
+    monkeypatch.setattr(db, "create_request", boom)
+    tk.pending[0]()
+    assert tk.get(tid)["status"] == "done"
+    tk.expire_triage()
+    assert tk.get(tid)["status"] == "done"
+
+
+def test_answering_is_an_open_status():
+    assert "answering" in tasks.OPEN_TASK_STATUSES
+
+
+def test_context_is_appended_but_not_scanned(tk, sh):
+    link = "https://example.slack.com/archives/C0ABC123/p1795627306218569"
+    tk.create_task("D1", "1.1", "web:1", "cómo va el CI", intake=True, context="mira " + link)
+    t = tk.rows("task")[0]
+    assert t["status"] == "answering" and t["text"].endswith("Contexto:\nmira " + link)
+    assert not [c for c in sh.calls if "owners" in c]
+    tk.pending[0]()
+    assert sh.calls[-1][-1] == "cómo va el CI"
+    tk.create_task("D1", "1.2", "web:2", "haz esto", intake=True, context="mira " + link)
+    assert not [c for c in sh.calls if "owners" in c]

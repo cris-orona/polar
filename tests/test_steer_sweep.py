@@ -135,7 +135,7 @@ def test_router_inbox_is_a_handoff_not_a_loss(tk, conn, sh, bot, out):
     assert texts(bot)[-1].startswith("↪️ La sesión no tiene una pantalla abierta. Se lo pasé al router")
 
 
-@pytest.mark.parametrize("outcome", [(0, "something new"), (1, ""), (None, "")])
+@pytest.mark.parametrize("outcome", [(0, "something new"), (1, "")])
 def test_failure_opens_a_new_task_in_the_thread(tk, conn, sh, bot, outcome):
     sh.bus = outcome
     card(conn, LAP + " w1:p3", "77.8")
@@ -217,8 +217,9 @@ def test_claim_that_never_finished_is_reported(tk, conn, bot):
     tk.conn.execute("UPDATE tasks SET status='sending' WHERE id=?", (sid,))
     age(tk, sid, 700)
     tk.sweep_steers()
-    assert tk.rows("steer")[0]["status"] == "rescued"
-    assert "abre una tarea nueva" in texts(bot)[-1]
+    assert tk.rows("steer")[0]["status"] == "dropped"
+    assert tk.rows("task") == []
+    assert "No pude confirmar" in texts(bot)[-1] and "sí" in texts(bot)[-1]
 
 
 def test_requester_without_a_session_id_is_reported(tk, conn, bot, sh):
@@ -228,3 +229,29 @@ def test_requester_without_a_session_id_is_reported(tk, conn, bot, sh):
     tk.sweep_steers()
     assert tk.get("s1")["status"] == "rescued" and sh.delivers() == []
     assert "abre una tarea nueva" in texts(bot)[-1]
+
+
+def test_timeout_never_opens_a_task_and_quotes_the_text(tk, conn, sh, bot):
+    sh.bus = (None, "")
+    card(conn, LAP + " w1:p3", "77.8")
+    tk.on_message(msg("sí", ts="10.7", thread="77.8"))
+    age(tk, tk.rows("steer")[0]["id"], 90)
+    tk.sweep_steers()
+    assert tk.rows("steer")[0]["status"] == "dropped" and tk.rows("task") == []
+    assert "No pude confirmar" in texts(bot)[-1] and "> sí" in texts(bot)[-1]
+
+
+@pytest.mark.parametrize("status", ["triage", "matched", "confirm", "routed", "answering", "queued"])
+def test_steer_waits_for_a_task_without_a_session(tk, conn, sh, bot, status):
+    tid = tk._insert("task", status, "T", "x", "D1", "50.5", "50.5")
+    tk.conn.execute("UPDATE tasks SET host='server' WHERE id=?", (tid,))
+    s = tk._insert("steer", "new", "S", "más", "D1", "50.5", "51.1", target_task=tid)
+    tk.deliver_steers()
+    assert tk.get(s)["status"] == "new" and tk.rows("task", status) and sh.delivers() == []
+
+
+def test_steer_of_a_dead_task_is_rescued(tk, conn, sh):
+    tid = tk._insert("task", "failed", "T", "x", "D1", "50.5", "50.5")
+    s = tk._insert("steer", "new", "S", "más", "D1", "50.5", "51.1", target_task=tid)
+    tk.deliver_steers()
+    assert tk.get(s)["status"] == "rescued"

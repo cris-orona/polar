@@ -452,7 +452,10 @@ LINEAGE_TIMEOUT = 5      # seconds for `agent-bus lineage`
 _lineage_cache: Dict[str, Any] = {}
 
 
-def lineage(sid: str) -> List[str]:
+LINEAGE_BUDGET = 3.0     # seconds in all for the lineage lookups of one list call
+
+
+def lineage(sid: str, budget: Optional[Dict[str, Any]] = None) -> List[str]:
     """`agent-bus lineage <sid>`: the session id first, then every successor (handoff or fresh wake), oldest first.
     A failure, a timeout or a bad answer gives [sid] (today's same-session rule). Kept for LINEAGE_TTL seconds."""
     now = time.time()
@@ -460,15 +463,22 @@ def lineage(sid: str) -> List[str]:
     if hit and hit[0] > now:
         return list(hit[1])
     result, ttl = [sid], LINEAGE_FAIL_TTL
+    timeout: float = LINEAGE_TIMEOUT
+    if budget is not None:
+        timeout = min(timeout, budget["until"] - time.monotonic())
+        if budget.get("failed") or timeout <= 0.2:
+            return [sid]  # one failure or the budget spent: today's rule for the rest of this call
     try:
         bus = os.environ.get("AGENT_BUS_BIN") or str(Path.home() / ".local/bin/agent-bus")
         out = subprocess.run([bus, "lineage", sid], capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                             timeout=LINEAGE_TIMEOUT)
+                             timeout=timeout)
         data = json.loads(out.stdout) if out.returncode == 0 else None
         if isinstance(data, list) and data and all(isinstance(x, str) for x in data):
             result, ttl = [sid] + [x for x in data if x != sid], LINEAGE_TTL
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
+    if budget is not None and ttl == LINEAGE_FAIL_TTL:
+        budget["failed"] = True
     _lineage_cache[sid] = (now + ttl, result)
     return list(result)
 
@@ -478,14 +488,14 @@ def _first_word(who: Optional[str]) -> str:
     return parts[0] if parts else ""
 
 
-def answered_by_lineage(conn: Any, req: Dict[str, Any]) -> bool:
+def answered_by_lineage(conn: Any, req: Dict[str, Any], budget: Optional[Dict[str, Any]] = None) -> bool:
     """True when a `revise` card was answered by a successor of its session (a handoff or a fresh wake has a new
     session id, so the same-session rule of `list_requests` never sees its card). A later card from any session of
     the lineage counts; for a follow-up (`via` = next) a later silent card counts too."""
     sid = _first_word(req.get("requester"))
     if not SESSION_ID_RE.match(sid) or not req.get("decided_at"):
         return False
-    chain = lineage(sid)
+    chain = lineage(sid, budget)
     follow = (req.get("result") or {}).get("via") == "next"
     for n in conn.execute("SELECT requester, silent FROM requests WHERE created_at>? AND id<>?"
                           " AND COALESCE(requester,'')<>''", (req["decided_at"], req["id"])).fetchall():
@@ -523,7 +533,8 @@ def list_requests(
     sql += " ORDER BY created_at, rowid"
     rows = [_row(r) for r in conn.execute(sql, args).fetchall()]
     if status == "open":
-        rows = [r for r in rows if not (r and r["status"] == "revise" and answered_by_lineage(conn, r))]
+        budget = {"until": time.monotonic() + LINEAGE_BUDGET, "failed": False}
+        rows = [r for r in rows if not (r and r["status"] == "revise" and answered_by_lineage(conn, r, budget))]
     return rows  # type: ignore[return-value]
 
 

@@ -42,6 +42,7 @@ MAX_CARD_QUOTE = 1500
 RELAY_POLL = 20.0            # seconds: the laptop relay (server-tasks, run by slack-watch) polls `polar steers`
 STEER_EXPIRE = 24 * 3600     # a steer that nobody took in this time is stale: no message
 SLOT_GRACE = 300             # seconds a new task-* tmux session holds a slot before the bus knows it
+OWNER_BUDGET = 8             # seconds in all for the thread-owner lookup (it runs on the event thread)
 BUS_QUICK_TIMEOUT = 10      # seconds for a bus read (owners, session, lineage): a failure falls back
 BUS_TIMEOUT = 120            # seconds for `agent-bus deliver` (it may resume a session)
 SENDING_STALE = 600          # a steer claimed this long ago and never finished: tell the owner
@@ -57,12 +58,19 @@ STATUS_REQUESTER = "status-answer"
 STATUS_RE = re.compile(
     r"c[oó]mo\s+(?:va|vamos|van)\b|en\s+qu[eé]\s+(?:va|qued[oó])\b|qu[eé]\s+pas[oó]\s+con\b"
     r"|\bstatus\s+(?:de|del|of)\b|\bavance\s+(?:de|del)\b|\bhow\s+is\b", re.I)
+STATUS_FUTURE_RE = re.compile(r"c[oó]mo\s+(?:va|vamos|van)\s+a\b", re.I)  # «cómo vamos a hacer»: a plan, not a status
+STATUS_WORK_RE = re.compile(
+    r"\b(?:haz|hazlo|hazla|implementa|impl[eé]mentalo|impl[eé]mentala|crea|cr[eé]alo|arregla|arr[eé]glalo|construye|"
+    r"constr[uú]yelo|manda|m[aá]ndalo|env[ií]a|env[ií]alo|corre|c[oó]rrelo|sube|s[uú]belo|cambia|c[aá]mbialo|"
+    r"agrega|ag[rr]egalo|quita|qu[ií]talo|borra|b[oó]rralo|prepara|prep[aá]ralo|revisa|rev[ií]salo|"
+    r"escribe|ejecuta|despliega|publica|actualiza|migra|elimina|a[nñ]ade)\b", re.I)
 
 
 def is_status_question(text: str) -> bool:
     """A short text that asks how something stands. Polar answers it from the bus and Polar facts, no session."""
     t = (text or "").strip()
-    return 0 < len(t) < STATUS_MAX_CHARS and bool(STATUS_RE.search(t))
+    return (0 < len(t) < STATUS_MAX_CHARS and bool(STATUS_RE.search(t))
+            and not STATUS_FUTURE_RE.search(t) and not STATUS_WORK_RE.search(t))
 SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
@@ -97,7 +105,9 @@ CATCHUP_PAGES = 3
 CATCHUP_TASK_DAYS = 2
 CATCHUP_MAX_AGE = 24 * 3600   # a round never reads further back than this
 CATCHUP_MAX_THREADS = 25      # one Slack call per thread: stay far under the rate limit
-OPEN_TASK_STATUSES = ("triage", "matched", "confirm", "routed", "queued", "running", "parked")
+UNSURE_WHY = "el bus no contestó a tiempo; puede que sí llegara"
+OPEN_TASK_STATUSES = ("triage", "matched", "confirm", "routed", "answering", "queued", "running", "parked")
+PRE_RUN_STATUSES = ("triage", "matched", "confirm", "routed", "answering", "queued")  # no session yet: a steer waits
 ARROW = re.compile(r"^\s*(?:→|->)\s*(\d+)\b[\s:.\-]*(.*)$", re.S)
 ITEM_PREFIX = re.compile(r"^\s*(?:[-*•–]|\d+[.)])\s+")
 FINAL = ("sent", "chosen", "discarded", "expired", "failed", "answered", "skipped", "revise", "replaced")
@@ -417,9 +427,15 @@ class Tasks:
                 refs.append(ref)
         return refs[:4]
 
-    def bus_json(self, *args: str) -> Any:
-        """`agent-bus <args>` as parsed JSON, or None on any failure or timeout."""
-        rc, out = self.sh([self.bus_bin(), *args], BUS_QUICK_TIMEOUT)
+    def bus_json(self, *args: str, deadline: Optional[float] = None) -> Any:
+        """`agent-bus <args>` as parsed JSON, or None on any failure or timeout. `deadline` is a monotonic time:
+        the call gets what is left of it and does not start after it."""
+        timeout = BUS_QUICK_TIMEOUT
+        if deadline is not None:
+            timeout = min(timeout, deadline - time.monotonic())
+            if timeout <= 0.2:
+                return None
+        rc, out = self.sh([self.bus_bin(), *args], timeout)
         if rc != 0 or not (out or "").strip():
             return None
         try:
@@ -429,9 +445,10 @@ class Tasks:
 
     def thread_owner(self, refs: List[str]) -> Optional[Tuple[str, str]]:
         """The first owner session of one of the thread refs that is live or parked: (session id, label).
-        Closed owners and every bus failure give None (normal triage)."""
+        Closed owners, every bus failure and the OWNER_BUDGET deadline give None (normal triage)."""
+        deadline = time.monotonic() + OWNER_BUDGET
         for ref in refs:
-            owners = self.bus_json("owners", "thread", ref)
+            owners = self.bus_json("owners", "thread", ref, deadline=deadline)
             if not isinstance(owners, list):
                 continue
             for o in owners[:3]:
@@ -439,7 +456,7 @@ class Tasks:
                                                     if isinstance(o, dict) else None)
                 if not sid or not re.fullmatch(r"[\w-]{4,64}", str(sid)):
                     continue
-                row = self.bus_json("session", str(sid))
+                row = self.bus_json("session", str(sid), deadline=deadline)
                 if isinstance(row, dict) and row.get("state") in ("live", "parked"):
                     label = row.get("title") or row.get("tmux") or str(sid)[:8]
                     return str(sid), str(label)
@@ -447,9 +464,11 @@ class Tasks:
 
     def create_task(self, channel: str, thread_ts: str, msg_ts: Optional[str], text: str,
                     where: str = DEFAULT_WHERE, intake: bool = False,
-                    own_thread: Optional[str] = None) -> Optional[str]:
+                    own_thread: Optional[str] = None, context: str = "") -> Optional[str]:
         """A new task. `intake` is a task that the owner wrote (DM or web): a Slack thread in it that a live or
-        parked session owns sends the task straight to that session (no triage)."""
+        parked session owns sends the task straight to that session (no triage). `context` (from Mando) is added to the
+        task text as its own block; the thread scan and the status check read only `text`."""
+        full = text + (("\n\nContexto:\n" + context.strip()) if (context or "").strip() else "")
         if intake and self.triage_on():
             try:
                 found = self.thread_owner(self.thread_refs(text, channel, own_thread))
@@ -457,17 +476,17 @@ class Tasks:
                 log.exception("thread owner lookup failed")
                 found = None
             if found:
-                return self._insert("task", "matched", clip_title(text), text, channel, thread_ts, msg_ts,
+                return self._insert("task", "matched", clip_title(text), full, channel, thread_ts, msg_ts,
                                     match_session=found[0], match_label=found[1][:80], match_reason=OWNER_REASON,
                                     match_conf="high",
                                     where_hint=where if where in WHERE_VALUES else DEFAULT_WHERE)
         if intake and self.status_answer_on() and is_status_question(text):
-            tid = self._insert("task", "answering", clip_title(text), text, channel, thread_ts, msg_ts,
+            tid = self._insert("task", "answering", clip_title(text), full, channel, thread_ts, msg_ts,
                                where_hint=where if where in WHERE_VALUES else DEFAULT_WHERE)
             if tid:
                 self.spawn(lambda: self.answer_status(tid))
             return tid
-        return self._insert("task", "triage" if self.triage_on() else "queued", clip_title(text), text, channel,
+        return self._insert("task", "triage" if self.triage_on() else "queued", clip_title(text), full, channel,
                             thread_ts, msg_ts, where_hint=where if where in WHERE_VALUES else DEFAULT_WHERE)
 
     def _back_to_triage(self, tid: str) -> None:
@@ -482,7 +501,7 @@ class Tasks:
             return False
         answer, sources = "", []
         try:
-            rc, out = self.sh([self.status_bin(), "--json", "--", t["text"]], STATUS_TIMEOUT)
+            rc, out = self.sh([self.status_bin(), "--json", "--", t["text"].split("\n\nContexto:\n")[0]], STATUS_TIMEOUT)
             if rc == 0:
                 data = json.loads((out or "").strip().splitlines()[-1])
                 if isinstance(data, dict) and data.get("ok") and str(data.get("answer_md") or "").strip():
@@ -492,6 +511,11 @@ class Tasks:
             log.warning("status-answer failed for task %s: %s", tid, type(exc).__name__)
         if not answer:
             self._back_to_triage(tid)
+            return False
+        cur = self.conn.execute(
+            "UPDATE tasks SET status='done', finished_at=?, updated_at=? WHERE id=? AND status='answering'",
+            (db.now_iso(), db.now_iso(), tid))  # closed before anything is posted: a crash cannot re-triage it
+        if cur.rowcount != 1:
             return False
         try:
             body = answer + (("\n\nFuentes: " + ", ".join(sources)) if sources else "")
@@ -503,7 +527,6 @@ class Tasks:
             log.exception("status card of task %s not stored", tid)
         if (os.environ.get("POLAR_DELIVERY") or "dm").strip().lower() == "web":  # the web is the only channel for the card: the thread post is the Slack copy.
             self.say(t["channel"], t["thread_ts"], answer[:3500])  # In dm mode the card shows in the thread.
-        self.update(tid, status="done", finished_at=db.now_iso())
         self.status_line(tid, "✅ Te respondí con el estado actual, sin abrir una sesión. "
                               "Si falta algo, escribe aquí y lo paso a la sesión.")
         return True
@@ -1333,8 +1356,8 @@ class Tasks:
             if not t:
                 self.rescue_steer(s, "la tarea ya no existe")
                 continue
-            if t["status"] == "queued":
-                continue
+            if t["status"] in PRE_RUN_STATUSES:
+                continue  # the task has no session yet: the steer stays `new` and goes out when it has one
             if t["status"] in ("parked", "done") and t.get("session_id"):
                 self.send_via_bus(s, t["session_id"], t.get("tmux") or "")  # the bus resumes it
                 continue
@@ -1371,7 +1394,7 @@ class Tasks:
         rc, out = self.sh(argv, BUS_TIMEOUT)
         out = (out or "").strip()
         if rc is None:
-            return False, "el bus no contestó a tiempo; puede que sí llegara"
+            return False, UNSURE_WHY
         if rc != 0:
             return False, "el bus no conoce esa sesión"
         if out.startswith(("delivered", "left in", "met ", "queued", "not typed")):
@@ -1396,8 +1419,22 @@ class Tasks:
             self.update(s["id"], status="delivered", notified=1)
             self.say(s["channel"], s["thread_ts"], why or "↪️ Enviado a la sesión")
             return True
-        self.rescue_steer(s, why)
+        if why == UNSURE_WHY:
+            self.unsure_steer(s, why)
+        else:
+            self.rescue_steer(s, why)
         return False
+
+    def unsure_steer(self, s: Dict[str, Any], why: str) -> None:
+        """The bus may have typed the text: never open a task (two copies). Warn in the thread and quote the text."""
+        cur = self.conn.execute(
+            "UPDATE tasks SET status='dropped', notified=1, updated_at=? WHERE id=? AND kind='steer'"
+            " AND status IN ('new','sending')", (db.now_iso(), s["id"]))
+        if cur.rowcount != 1:
+            return
+        self.say(s["channel"], s["thread_ts"],
+                 "⚠️ No pude confirmar si tu mensaje llegó a la sesión (%s). Revisa antes de escribirlo otra vez. "
+                 "Tu texto, para que no se pierda:\n> %s" % (why, " ".join((s["text"] or "").split())[:MAX_STEER_CHARS]))
 
     def _steer_context(self, s: Dict[str, Any], t: Optional[Dict[str, Any]]) -> Tuple[str, str]:
         """(what the owner answers, how it ended) for a steer whose session cannot take it."""
@@ -1452,7 +1489,7 @@ class Tasks:
         now = time.time()
         for s in self.rows("steer", "sending"):
             if now - _epoch(s["updated_at"]) >= SENDING_STALE:  # the process died after the claim
-                self.rescue_steer(s, "no pude confirmar el envío")
+                self.unsure_steer(s, "no pude confirmar el envío")
         for s in self.rows("steer", "new"):
             age = now - _epoch(s["created_at"])
             if age >= STEER_EXPIRE:

@@ -81,3 +81,18 @@ def test_dm_own_thread_is_checked(tk, sh):
     sh.owners["D1:10.2"] = [SID]
     tk.on_message(msg("otra", ts="10.2", thread="10.2"))
     assert tk.rows("task")[1]["match_session"] == SID
+
+
+def test_lookup_stops_at_the_deadline(tk, sh, monkeypatch):
+    import polar.tasks as T
+    clock = [1000.0]
+    monkeypatch.setattr(T.time, "monotonic", lambda: clock[0])
+
+    def slow(argv, timeout=15):
+        sh.calls.append(argv)
+        clock[0] += 5
+        return 1, ""
+    tk.sh = slow
+    refs = ["C1:1.1", "C1:2.2", "C1:3.3", "C1:4.4"]
+    assert tk.thread_owner(refs) is None
+    assert len([c for c in sh.calls if "owners" in c]) <= 2
