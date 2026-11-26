@@ -496,11 +496,13 @@ class Tasks:
         try:
             body = answer + (("\n\nFuentes: " + ", ".join(sources)) if sources else "")
             db.create_request(self.conn, "report", "Estado: " + clip_title(t["text"])[:50], "Pregunta: " + t["text"][:250],
-                              STATUS_REQUESTER, draft_text=body, silent=True,
+                              STATUS_REQUESTER, draft_text=body,
+                              target_channel=t["channel"], target_thread_ts=t["thread_ts"],
                               report={"next": [STATUS_FOLLOW_UP]})
         except Exception:
             log.exception("status card of task %s not stored", tid)
-        self.say(t["channel"], t["thread_ts"], answer[:3500])
+        if (os.environ.get("POLAR_DELIVERY") or "dm").strip().lower() == "web":  # the web is the only channel for the card: the thread post is the Slack copy.
+            self.say(t["channel"], t["thread_ts"], answer[:3500])  # In dm mode the card shows in the thread.
         self.update(tid, status="done", finished_at=db.now_iso())
         self.status_line(tid, "✅ Te respondí con el estado actual, sin abrir una sesión. "
                               "Si falta algo, escribe aquí y lo paso a la sesión.")

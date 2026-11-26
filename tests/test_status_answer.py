@@ -52,9 +52,9 @@ def test_answered(tk, sh, bot, conn):
     tk.process_triage()
     tk.pending[0]()
     assert tk.get(t["id"])["status"] == "done"
-    assert any("Va bien" in x for x in texts(bot))
+    assert not any("Va bien" in x for x in texts(bot))  # dm mode: the card shows in the thread, no second post
     card = [r for r in db.list_requests(conn, "all") if r["requester"] == "status-answer"][0]
-    assert card["kind"] == "report" and card["silent"] == 1 and card["report"]["next"] == ["Pregúntale a la sesión"]
+    assert card["kind"] == "report" and card["silent"] == 0 and card["report"]["next"] == ["Pregúntale a la sesión"]
     assert "Fuentes: pr:a#1" in card["draft_text"]
 
 
@@ -87,6 +87,14 @@ def test_follow_up_opens_normal_routing(conn, bot, user, tk):
     tk.on_message(msg("cómo va el CI"))
     tk.pending[0]()
     card = [r for r in db.list_requests(conn, "all") if r["requester"] == "status-answer"][0]
+    polar.deliver_pending()
     polar.on_next(OWNER, card["id"], 0)
     new = [t for t in tk.rows("task") if t["status"] == "triage"]
     assert len(new) == 1 and "Pregúntale a la sesión" in new[0]["text"] and "cómo va el CI" in new[0]["text"]
+
+
+def test_web_mode_posts_the_answer_in_the_thread(tk, bot, monkeypatch):
+    monkeypatch.setenv("POLAR_DELIVERY", "web")
+    tk.on_message(msg("cómo va el CI"))
+    tk.pending[0]()
+    assert any("Va bien" in x for x in texts(bot))
