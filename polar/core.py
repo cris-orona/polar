@@ -210,8 +210,10 @@ class Polar:
                     sent += 1
                 continue
             try:
-                channel, ts = self._fit(req, lambda r: {"text": blocks.fallback_text(r),
-                                                        "blocks": blocks.request_blocks(r)}, self._post_dm)
+                thread = req.get("target_thread_ts") if req["kind"] == "report" else None
+                channel, ts = self._fit(req, lambda r: dict(
+                    {"text": blocks.fallback_text(r), "blocks": blocks.request_blocks(r)},
+                    **({"thread_ts": thread} if thread else {})), self._post_dm)
             except _BadCard as exc:
                 self._card_failed(req, exc.__cause__ or exc)
                 continue
@@ -232,6 +234,8 @@ class Polar:
     def _post_dm(self, **card: Any) -> Any:
         """Post one message in the owner's DM. Return (channel, ts)."""
         channel = self.bot.conversations_open(users=self.owner_id)["channel"]["id"]
+        if db.get_meta(self.conn, "owner_dm") != channel:
+            db.set_meta(self.conn, "owner_dm", channel)
         return channel, self.bot.chat_postMessage(channel=channel, **card)["ts"]
 
     def _fit(self, req: Dict[str, Any], build: Any, send: Any) -> Any:

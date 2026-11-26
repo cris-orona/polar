@@ -92,7 +92,7 @@ def test_case_parked_server_session_is_resumed_by_the_bus(tk, sh, bot, tmp_path)
     tk.on_message(msg("sigue con esto", ts="10.5", thread="10.1"))
     tk.deliver_steers()
     argv = sh.delivers()[0]
-    assert argv[2] == t["session_id"] and "Polar (owner): sigue con esto" in argv
+    assert argv[2] == t["session_id"] and any(a.startswith("Polar (owner): sigue con esto") for a in argv)
     assert argv[argv.index("--ref") + 1].startswith("polar-steer:")
     assert tk.rows("steer")[0]["status"] == "delivered"
     assert texts(bot)[-1] == "↪️ Enviado a la sesión"

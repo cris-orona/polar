@@ -327,6 +327,21 @@ def validate_report(links: Any, files: Any, resume: Optional[str], nxt: Any = No
     return out
 
 
+DEFAULT_OWNER_DM = "D0000000000"  # placeholder: set POLAR_OWNER_DM. Polar stores the channel it really uses in meta
+
+
+def owner_dm_channel(conn: Any = None) -> str:
+    """The owner's DM channel with Polar: the one Polar posted in last (meta `owner_dm`), else env, else the default."""
+    if conn is not None:
+        try:
+            known = get_meta(conn, "owner_dm")
+        except Exception:
+            known = None
+        if known:
+            return str(known)
+    return os.environ.get("POLAR_OWNER_DM") or DEFAULT_OWNER_DM
+
+
 def create_request(
     conn: sqlite3.Connection,
     kind: str,
@@ -353,6 +368,9 @@ def create_request(
     dm_ts, so deliver_pending never sends it. Mando and the web API still read it as a posted report."""
     if kind not in KINDS:
         raise ValueError("bad kind")
+    if kind == "reply" and target_channel and target_channel == owner_dm_channel(conn):
+        # An answer to the owner is never an editable reply card: it is a report in the same thread.
+        kind, report = "report", report or {}
     if silent and kind != "report":
         raise ValueError("only a report can be silent")
     if silent and (report or {}).get("files"):

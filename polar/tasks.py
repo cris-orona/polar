@@ -87,7 +87,12 @@ FINAL = ("sent", "chosen", "discarded", "expired", "failed", "answered", "skippe
 ONLY_FILES = "Revisa los archivos adjuntos."
 OK_SUBTYPES = (None, "file_share")  # a message with a file comes as subtype file_share
 
-RESUME_PROMPT = ("El dueño pidió reanudar desde Polar. Retoma donde quedaste y termina con polar report.")
+ANSWER_RULE = ("To answer the owner's question, use `polar report --thread {thread} --channel {channel} "
+               "--requester …` (he reads it in the thread and in Mando). `polar ask reply` is only for a "
+               "message to ANOTHER person.")
+
+RESUME_PROMPT = ("El dueño pidió reanudar desde Polar. Retoma donde quedaste y termina con polar report. "
+                 + ANSWER_RULE.format(thread="<thread>", channel="<channel>"))
 
 
 def task_model(text: str = "") -> str:
@@ -140,6 +145,7 @@ BRIEF = (
     "(general-purpose is Sonnet; pass model: \"sonnet\" to Explore); keep decisions and critical edits here. "
     "Ask the owner only through `{polar_bin} ask ... --thread {thread} --channel {channel} "
     "--requester \"{session} task-{id}\"` so cards land in the task thread and the answer is typed into this session. "
+    + ANSWER_RULE + " "
     "If a step needs the laptop (browser, a laptop-only MCP), hand it off: polar handoff --title T --text-file F --requester \"<your session id> <your tmux name>\"; the laptop session sends you the result. "
     "When you finish (or stop for good), send one report: polar report --title \"<qué quedó, en español>\" "
     "--text-file <md> [--link \"PR=<url>\"] [--link \"Documento=<url>\"] [--file <pdf>] --requester <same as above>. "
@@ -1217,14 +1223,17 @@ class Tasks:
     def bus_bin(self) -> str:
         return os.environ.get("AGENT_BUS_BIN") or str(Path.home() / ".local/bin/agent-bus")
 
-    def bus_deliver(self, sid: str, text: str, place: str, ref: str) -> Tuple[bool, str]:
+    def bus_deliver(self, sid: str, text: str, place: str, ref: str,
+                    channel: str = "", thread: str = "") -> Tuple[bool, str]:
         """Hand `text` to a session through `agent-bus deliver`. It types into a live session, queues for the laptop,
         or resumes a parked or closed one. Return (the bus took it, the reason in Spanish when not). «queued»
         means the bus holds it and tries again by itself; --ref makes a repeat do nothing. «router inbox» means
         the bus found no place to type and gave the text to the Slack router, which finds the session: the reason
         is then ROUTER_HAS_IT and the owner must not write it again (two copies)."""
         argv = [self.bus_bin(), "deliver", sid, "--from", "polar", "--ref", ref,
-                "--text", "Polar (owner): " + " ".join(text.split())[:MAX_STEER_CHARS]]
+                "--text", "Polar (owner): " + " ".join(text.split())[:MAX_STEER_CHARS]
+                + (("\n\n[" + ANSWER_RULE.format(thread=thread, channel=channel) + "]") if thread and channel
+                   else "")]
         if place and re.fullmatch(r"[\w.:-]+", place):
             argv += ["--place", place]
         rc, out = self.sh(argv, BUS_TIMEOUT)
@@ -1249,7 +1258,8 @@ class Tasks:
             (db.now_iso(), s["id"]))
         if cur.rowcount != 1:
             return False
-        ok, why = self.bus_deliver(sid, s["text"], place, "polar-steer:" + s["id"])
+        ok, why = self.bus_deliver(sid, s["text"], place, "polar-steer:" + s["id"],
+                                  s.get("channel") or "", s.get("thread_ts") or "")
         if ok:
             self.update(s["id"], status="delivered", notified=1)
             self.say(s["channel"], s["thread_ts"], why or "↪️ Enviado a la sesión")

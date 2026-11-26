@@ -130,6 +130,8 @@ def build_parser() -> argparse.ArgumentParser:
     rp = sub.add_parser("report", help="send an FYI card: what a session did")
     rp.add_argument("--title", required=True, help="short, Spanish")
     rp.add_argument("--text-file", required=True, help="Markdown file, or - for stdin")
+    rp.add_argument("--channel", help="channel of the thread the report answers (with --thread)")
+    rp.add_argument("--thread", help="ts of the thread root: the report is posted inside that thread")
     rp.add_argument("--link", action="append", default=[], metavar="Label=https://...",
                     help="URL button (max 5, http/https)")
     rp.add_argument("--file", action="append", default=[], help="file to attach in the card thread")
@@ -526,6 +528,9 @@ def cmd_ask(args: argparse.Namespace) -> int:
             target_channel=args.channel, target_thread_ts=args.thread,
             expires_hours=args.expires_hours, requester_label=args.requester_label,
             reply_to_ts=args.reply_to, replaces=args.replaces)
+        if (db.get(conn, rid) or {}).get("kind") == "report":
+            print("Polar: an answer to the owner is a report, not a reply; sent as report %s" % rid,
+                  file=sys.stderr)
     elif args.kind == "agent":
         with open(args.brief_file, encoding="utf-8") as fh:
             brief = fh.read().strip()
@@ -569,7 +574,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         expires_hours=args.expires_hours or db.REPORT_EXPIRY_HOURS,
         requester_label=args.requester_label,
         report={"links": args.link, "files": files, "resume": args.resume, "next": args.next},
-        silent=args.silent)
+        silent=args.silent, target_channel=args.channel, target_thread_ts=args.thread)
     _out({"id": rid})
     return 0
 
