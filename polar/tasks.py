@@ -668,7 +668,8 @@ class Tasks:
     def _steer_thread(self, channel: str, thread: str, ts: str, text: str) -> None:
         text = text[:MAX_STEER_CHARS]
         task = self.conn.execute(
-            "SELECT id FROM tasks WHERE kind='task' AND thread_ts=?", (thread,)).fetchone()
+            "SELECT id FROM tasks WHERE kind='task' AND thread_ts=? ORDER BY created_at DESC, rowid DESC",
+            (thread,)).fetchone()
         if task:
             self.create_steer(channel, thread, ts, text, target_task=task["id"])
             return
@@ -1197,17 +1198,16 @@ class Tasks:
             t = self.get(s["target_task"])
             if t and t["host"] == "laptop":
                 continue  # the laptop delivers it (`polar steers`)
-            if not t or t["status"] == "queued":
-                if t is None:
-                    self.update(s["id"], status="dropped", notified=1)
+            if not t:
+                self.rescue_steer(s, "la tarea ya no existe")
+                continue
+            if t["status"] == "queued":
                 continue
             if t["status"] in ("parked", "done") and t.get("session_id"):
                 self.send_via_bus(s, t["session_id"], t.get("tmux") or "")  # the bus resumes it
                 continue
             if t["status"] != "running":
-                self.update(s["id"], status="dropped", notified=1)
-                self.say(s["channel"], s["thread_ts"],
-                         "⚠️ No lo envié: la sesión está en estado «%s»." % t["status"])
+                self.rescue_steer(s, "la sesión está en estado «%s»" % t["status"], t)
                 continue
             if self.type_into(t["tmux"], s["text"]):
                 self.update(s["id"], status="delivered", notified=1)
@@ -1264,9 +1264,54 @@ class Tasks:
             self.update(s["id"], status="delivered", notified=1)
             self.say(s["channel"], s["thread_ts"], why or "↪️ Enviado a la sesión")
             return True
+        self.rescue_steer(s, why)
+        return False
+
+    def _steer_context(self, s: Dict[str, Any], t: Optional[Dict[str, Any]]) -> Tuple[str, str]:
+        """(what the owner answers, how it ended) for a steer whose session cannot take it."""
+        if t is None and s.get("target_task"):
+            t = self.get(s["target_task"])
+        if t:
+            r = self.report_for(t)
+            last = ("informe «%s»: %s" % (r["title"], (r.get("draft_text") or "")[:MAX_CARD_QUOTE // 3])) if r \
+                else "sin informe (estado %s)" % t["status"]
+            return "la tarea «%s»" % t["title"], last
+        req = self.conn.execute("SELECT * FROM requests WHERE dm_ts=?", (s.get("thread_ts"),)).fetchone() \
+            if s.get("thread_ts") else None
+        if req:
+            req = db._row(req)
+            return "la tarjeta «%s»" % req["title"], outcome_line(req)
+        return "este hilo", "sin dato"
+
+    def rescue_steer(self, s: Dict[str, Any], why: str = "", t: Optional[Dict[str, Any]] = None) -> bool:
+        """A thread reply never drops. When no session can take the steer, the text opens a new task in the same
+        thread (title and last outcome of the old task as context) and the owner reads which way it went. Only a
+        hard error leaves the text in the thread so it is not lost. Return True when a task started."""
+        cur = self.conn.execute(
+            "UPDATE tasks SET status='rescued', notified=1, updated_at=? WHERE id=? AND kind='steer'"
+            " AND status IN ('new','sending')", (db.now_iso(), s["id"]))
+        if cur.rowcount != 1:
+            return False
+        tid: Optional[str] = None
+        try:
+            what, last = self._steer_context(s, t)
+            text = (s["text"] or "").strip()[:MAX_STEER_CHARS]
+            body = ("Sobre %s: %s\n\n[Polar: el dueño escribió esto en el hilo de %s, pero su sesión ya no lo recibe%s. "
+                    "Último resultado: %s. Si una sesión ya lleva este tema, es de ella.]" % (
+                        what, text, what, " (%s)" % why if why else "", last))
+            if s.get("thread_ts"):
+                tid = self._insert("task", "triage" if self.triage_on() else "queued", clip_title(body), body,
+                                   s["channel"], s["thread_ts"], "steer:" + s["id"], where_hint=DEFAULT_WHERE)
+        except Exception:
+            log.exception("steer %s could not open a task", s["id"])
+        if tid:
+            self.status_line(tid, self.received(
+                "🧭 La sesión de esta conversación ya no recibe mensajes: tu texto abre una tarea nueva aquí."))
+            return True
         self.update(s["id"], status="dropped", notified=1)
         self.say(s["channel"], s["thread_ts"],
-                 "⚠️ Tu mensaje no llegó a ninguna sesión: %s. Escríbelo otra vez cuando quieras." % why)
+                 "⚠️ Error: no pude abrir una tarea con tu mensaje. Tu texto, para que no se pierda:\n> %s"
+                 % " ".join((s["text"] or "").split())[:MAX_STEER_CHARS])
         return False
 
     def sweep_steers(self) -> None:
@@ -1275,14 +1320,11 @@ class Tasks:
         now = time.time()
         for s in self.rows("steer", "sending"):
             if now - _epoch(s["updated_at"]) >= SENDING_STALE:  # the process died after the claim
-                self.update(s["id"], status="dropped", notified=1)
-                self.say(s["channel"], s["thread_ts"],
-                         "⚠️ Tu mensaje no llegó a ninguna sesión: no pude confirmar el envío. "
-                         "Escríbelo otra vez cuando quieras.")
+                self.rescue_steer(s, "no pude confirmar el envío")
         for s in self.rows("steer", "new"):
             age = now - _epoch(s["created_at"])
             if age >= STEER_EXPIRE:
-                self.update(s["id"], status="expired", notified=1)
+                self.rescue_steer(s, "nadie lo tomó en 24 horas")
                 continue
             if age < self.relay_wait() or s["target_tab"]:
                 continue  # a tab steer names a pane number: only the relay can type it
@@ -1296,12 +1338,7 @@ class Tasks:
                 parts = real_requester(s["requester"]).split()
                 sid, place = (parts[0] if parts else ""), (parts[1] if len(parts) > 1 else "")
             if not SESSION_ID.fullmatch(sid):
-                cur = self.conn.execute("UPDATE tasks SET status='dropped', notified=1, updated_at=? WHERE id=?"
-                                        " AND kind='steer' AND status='new'", (db.now_iso(), s["id"]))
-                if cur.rowcount == 1:
-                    self.say(s["channel"], s["thread_ts"],
-                             "⚠️ Tu mensaje no llegó a ninguna sesión: la tarjeta no dice quién la hizo. "
-                             "Escríbelo otra vez cuando quieras.")
+                self.rescue_steer(s, "la tarjeta no dice quién la hizo", t)
                 continue
             self.send_via_bus(s, sid, place)
 

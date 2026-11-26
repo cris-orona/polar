@@ -426,7 +426,7 @@ def test_steer_running_task(tk, sh, bot):
     assert tk.get(t["id"])["updated_at"] >= before
 
 
-def test_steer_finished_task_is_dropped(tk, sh, bot):
+def test_steer_finished_task_opens_a_new_task(tk, sh, bot):
     tk.on_message(msg("haz algo"))
     tk.tick()
     t = tk.rows("task")[0]
@@ -435,8 +435,11 @@ def test_steer_finished_task_is_dropped(tk, sh, bot):
     tk.reap()
     tk.deliver_steers()  # a finished server session gets it through agent-bus (see test_steer_sweep.py)
     assert len(sh.of("deliver")) == 1
-    assert tk.rows("steer")[0]["status"] == "dropped"  # the fake bus gave no outcome
-    assert texts(bot)[-1].startswith("⚠️ Tu mensaje no llegó a ninguna sesión")
+    assert tk.rows("steer")[0]["status"] == "rescued"  # the fake bus gave no outcome: the text is not lost
+    new = tk.rows("task")[-1]
+    assert new["id"] != t["id"] and new["thread_ts"] == t["thread_ts"]
+    assert "más" in new["text"] and t["title"] in new["text"]
+    assert "abre una tarea nueva" in texts(bot)[-1]
 
 
 def test_laptop_steer_delivered_notice(tk, bot, conn, monkeypatch, capsys, tmp_path):

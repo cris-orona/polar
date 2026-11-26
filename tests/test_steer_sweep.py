@@ -135,30 +135,49 @@ def test_router_inbox_is_a_handoff_not_a_loss(tk, conn, sh, bot, out):
     assert texts(bot)[-1].startswith("↪️ La sesión no tiene una pantalla abierta. Se lo pasé al router")
 
 
-@pytest.mark.parametrize("outcome,why", [
-    ((0, "something new"), "no encontré dónde escribirle"),
-    ((1, ""), "no conoce esa sesión"),
-    ((None, ""), "no contestó a tiempo"),
-])
-def test_failure_is_visible_and_dropped(tk, conn, sh, bot, outcome, why):
+@pytest.mark.parametrize("outcome", [(0, "something new"), (1, ""), (None, "")])
+def test_failure_opens_a_new_task_in_the_thread(tk, conn, sh, bot, outcome):
     sh.bus = outcome
     card(conn, LAP + " w1:p3", "77.8")
     tk.on_message(msg("sí", ts="10.7", thread="77.8"))
     age(tk, tk.rows("steer")[0]["id"], 90)
     tk.sweep_steers()
-    assert tk.rows("steer")[0]["status"] == "dropped"
+    assert tk.rows("steer")[0]["status"] == "rescued"
+    new = tk.rows("task")[0]
+    assert new["thread_ts"] == "77.8" and "¿Sí?" in new["text"] and "sí" in new["text"]
     last = texts(bot)[-1]
-    assert last.startswith("⚠️ Tu mensaje no llegó a ninguna sesión") and why in last
+    assert "abre una tarea nueva" in last and "Escríbelo otra vez" not in last
+    assert tk.rows("steer")[0]["status"] != "dropped"
 
 
-def test_old_steer_expires_without_a_message(tk, conn, sh, bot):
+def test_old_steer_opens_a_task_instead_of_expiring(tk, conn, sh, bot):
     card(conn, LAP + " w1:p3", "77.8")
     tk.on_message(msg("sí", ts="10.7", thread="77.8"))
-    n = len(bot.calls)
     age(tk, tk.rows("steer")[0]["id"], 25 * 3600)
     tk.sweep_steers()
-    assert tk.rows("steer")[0]["status"] == "expired"
-    assert sh.delivers() == [] and len(bot.calls) == n
+    assert tk.rows("steer")[0]["status"] == "rescued"
+    assert sh.delivers() == [] and len(tk.rows("task")) == 1
+
+
+def test_hard_error_keeps_the_text(tk, conn, bot, monkeypatch):
+    card(conn, LAP + " w1:p3", "77.8")
+    tk.on_message(msg("texto importante", ts="10.7", thread="77.8"))
+    s = tk.rows("steer")[0]
+    monkeypatch.setattr(tk, "_insert", lambda *a, **k: None)
+    assert not tk.rescue_steer(s, "x")
+    assert tk.rows("steer")[0]["status"] == "dropped"
+    assert "texto importante" in texts(bot)[-1] and "Error" in texts(bot)[-1]
+
+
+def test_next_steer_goes_to_the_newest_task_of_the_thread(tk, conn, sh):
+    card(conn, LAP + " w1:p3", "77.8")
+    tk.on_message(msg("uno", ts="10.7", thread="77.8"))
+    age(tk, tk.rows("steer")[0]["id"], 90)
+    sh.bus = (1, "")
+    tk.sweep_steers()
+    newt = tk.rows("task")[0]
+    tk.on_message(msg("dos", ts="10.8", thread="77.8"))
+    assert tk.rows("steer")[-1]["target_task"] == newt["id"]
 
 
 def test_tab_steer_is_left_to_the_relay(tk, sh):
@@ -198,8 +217,8 @@ def test_claim_that_never_finished_is_reported(tk, conn, bot):
     tk.conn.execute("UPDATE tasks SET status='sending' WHERE id=?", (sid,))
     age(tk, sid, 700)
     tk.sweep_steers()
-    assert tk.rows("steer")[0]["status"] == "dropped"
-    assert "no pude confirmar" in texts(bot)[-1]
+    assert tk.rows("steer")[0]["status"] == "rescued"
+    assert "abre una tarea nueva" in texts(bot)[-1]
 
 
 def test_requester_without_a_session_id_is_reported(tk, conn, bot, sh):
@@ -207,5 +226,5 @@ def test_requester_without_a_session_id_is_reported(tk, conn, bot, sh):
                  " VALUES ('s1','steer','new','t','hola','D1','1.1','1.2','watchdog','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')")
     age(tk, "s1", 90)
     tk.sweep_steers()
-    assert tk.get("s1")["status"] == "dropped" and sh.delivers() == []
-    assert "no dice quién la hizo" in texts(bot)[-1]
+    assert tk.get("s1")["status"] == "rescued" and sh.delivers() == []
+    assert "abre una tarea nueva" in texts(bot)[-1]
