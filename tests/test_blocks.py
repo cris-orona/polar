@@ -21,7 +21,7 @@ def test_edited_text_is_shown(conn, reply_id):
 
 def test_decision_blocks(conn, decision_id):
     acts = blocks.request_blocks(db.get(conn, decision_id))[-1]["elements"]
-    assert [a["text"]["text"] for a in acts] == ["Go", "Esperar", "🔁 Pedir cambios"]
+    assert [a["text"]["text"] for a in acts] == ["Go", "Esperar", "Sí, y sigue", "🔁 Pedir cambios"]
     assert acts[0]["action_id"] == "polar_choose:go"
 
 

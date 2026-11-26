@@ -966,7 +966,8 @@ class Polar:
         except Exception:
             log.exception("card %s has no session and its task did not start", rid)
 
-    def on_choose(self, user_id: str, rid: str, key: str, src: Optional[str] = None) -> None:
+    def on_choose(self, user_id: str, rid: str, key: str, src: Optional[str] = None,
+                  and_continue: bool = False) -> None:
         if not self.is_owner(user_id):
             return
         req = db.get(self.conn, rid)
@@ -979,6 +980,8 @@ class Polar:
         if key not in allowed:
             return
         fields = dict(result_json=_res(src, option=key), decided_at=db.now_iso())
+        if and_continue and blocks.can_continue(req) and req["kind"] == "decision":
+            fields["and_continue"] = 1
         if (db.transition(self.conn, rid, "shown", "chosen", **fields)
                 or (req["kind"] == "report" and db.transition(self.conn, rid, "noted", "chosen", **fields))):
             if req["kind"] == "report" and key == "resume":

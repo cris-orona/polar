@@ -176,7 +176,7 @@ def _run(polar: Polar, req: Dict[str, Any], action: str, body: Dict[str, Any]) -
             opts = [o["key"] for o in req["options"]]
         if key not in opts:
             raise ActionError("Opción no válida.", 400)
-        polar.on_choose(owner, rid, key, src=SRC)
+        polar.on_choose(owner, rid, key, src=SRC, and_continue=bool(body.get("and_continue")))
     elif action == "answer":
         _answer(polar, req, body)
     elif action == "send":

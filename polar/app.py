@@ -60,6 +60,12 @@ def register(app: Any, polar: Polar) -> None:
         key = body["actions"][0]["action_id"].split(":", 1)[1]
         polar.on_choose(uid(body), rid(body), key)
 
+    @app.action(re.compile(r"^polar_choose_go:"))
+    def _choose_go(ack, body):
+        ack()
+        key = body["actions"][0]["action_id"].split(":", 1)[1]
+        polar.on_choose(uid(body), rid(body), key, and_continue=True)
+
     @app.action(re.compile(r"^polar_link:"))
     def _link(ack):
         ack()  # a URL button opens the page; Slack still sends the click

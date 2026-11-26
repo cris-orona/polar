@@ -312,6 +312,16 @@ def next_checked(state: Dict[str, Any], rid: str) -> List[int]:
     return sorted(out)
 
 
+CONTINUE_LABEL = "Sí, y sigue"
+
+
+def can_continue(req: Dict[str, Any]) -> bool:
+    """«Sí, y sigue» is offered on a decision card, never on a prod-op step. It is bound to the first option
+    (a decision card has no recommended option)."""
+    return (req.get("kind") == "decision" and bool(req.get("options"))
+            and not (req.get("requester") or "").startswith("prod-op"))
+
+
 def request_blocks(req: Dict[str, Any], hint: Optional[str] = None) -> List[Dict[str, Any]]:
     """The message with buttons."""
     if req["kind"] == "questions":
@@ -337,6 +347,9 @@ def request_blocks(req: Dict[str, Any], hint: Optional[str] = None) -> List[Dict
              "text": {"type": "plain_text", "text": clip(o["label"], 70)}}
             for o in req["options"]
         ]
+        if can_continue(req):
+            elements.append({"type": "button", "action_id": "polar_choose_go:" + req["options"][0]["key"],
+                             "value": rid, "text": {"type": "plain_text", "text": CONTINUE_LABEL}})
     elements.append(revise_button(rid))
     blocks.append({"type": "actions", "block_id": "polar_actions", "elements": elements})
     return blocks
@@ -374,6 +387,8 @@ def _result_line(req: Dict[str, Any]) -> str:
             if res.get("option") == "resume":
                 return "▶️ Reanudé la sesión — " + clip(req["title"], 150)
             return "📋 Visto — " + clip(req["title"], 150)
+        if req.get("and_continue"):
+            return "👉 Elegiste «%s» · y sigue" % option_label(req, res.get("option", ""))
         line = "👉 Elegiste: " + option_label(req, res.get("option", ""))
         if len(req["title"]) <= 60:
             line += " — " + req["title"]

@@ -34,6 +34,7 @@ def _public(req: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": req["created_at"], "decided_at": req["decided_at"],
         "expires_at": req["expires_at"],
         "chosen_option": res.get("option"),
+        "and_continue": int(req.get("and_continue") or 0),
         **({"instructions": res["instructions"]} if res.get("instructions") else {}),
         **({"via": res["via"]} if res.get("via") else {}),
         **({"indexes": res["indexes"], "steps": res["steps"]} if res.get("steps") else {}),

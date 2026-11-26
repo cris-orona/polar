@@ -111,6 +111,7 @@ NEW_COLUMNS = {
     "email_subject": "TEXT",
     "extras_json": "TEXT",  # decision/questions: {"body": md, "links": [...], "files": [...]}
     "compact": "INTEGER NOT NULL DEFAULT 0",  # the body step (blocks.BODY_LIMITS) that Slack accepted
+    "and_continue": "INTEGER NOT NULL DEFAULT 0",  # decision chosen with «Sí, y sigue»: the session goes on with the plan
     "silent": "INTEGER NOT NULL DEFAULT 0",  # `polar report --silent`: a machine notice; Mando keeps it out of Foco
 }
 
@@ -458,6 +459,7 @@ def transition(
     """Move a request in one atomic step. Return False when it is not in from_status."""
     allowed = {
         "final_text", "result_json", "decided_at", "dm_channel", "dm_ts", "dm_done", "reopened_at",
+        "and_continue",
     }
     assert set(fields) <= allowed
     sets = ["status=?"] + [f"{k}=?" for k in fields]
