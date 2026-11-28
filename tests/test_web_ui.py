@@ -777,3 +777,27 @@ def test_file_is_streamed_in_chunks(ui, conn, data, monkeypatch):
     assert code == 200 and body == blob and h["Content-Length"] == str(len(blob))
     assert sizes and max(sizes) <= server.CHUNK and -1 not in sizes
     assert call(ui, "HEAD", "/files/%s/0" % rid)[1] == b""
+
+
+# -- links ---------------------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("url", ["/\\evil.example", "/\\\\evil.example/x", "/&#92;evil.example", "/a\\b", "//evil.example",
+                                 "/\tevil.example", "javascript:alert(1)"])
+def test_unsafe_links_are_refused(url):
+    assert not views.safe_url(url)
+
+
+@pytest.mark.parametrize("url", ["/reports/x", "/a/b\\c", "#top", "https://example.com/a", "http://example.com"])
+def test_safe_links_are_kept(url):
+    assert views.safe_url(url)
+
+
+def test_backslash_link_renders_as_hash():
+    out = views.md("[x](/\\evil.example)")
+    assert 'href="#"' in out and "evil.example\"" not in out
+
+
+def test_href_text_is_not_rewritten():
+    out = views.md('Write href="javascript:alert(1)" in the text, and `href="/x"` in code.')
+    assert 'href="javascript:alert(1)"' in out and 'href="/x"' in out and "target=" not in out and "<a" not in out
+    link = views.md('[site](https://example.com) then href="https://example.com" as words')
+    assert link.count('target="_blank"') == 1 and link.count("<a ") == 1
