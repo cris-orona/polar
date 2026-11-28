@@ -299,6 +299,50 @@ def validate_questions(raw: Any) -> List[Dict[str, Any]]:
     return out
 
 
+# A session report must say what was checked: a heading such as «Qué revisé», «Qué revisé y qué no», «Qué comprobé»,
+# «Pruebas», «Verificación» (or a bold line with those words), with some text under it. The owner reads the evidence
+# on the card, and an «it is done» with no check is the failure that costs the most later. POLAR_REPORT_EVIDENCE=off
+# turns the rule off.
+EVIDENCE_HEADING_RE = re.compile(
+    r"^\s*(?:#{1,6}\s+|\*\*)[^\n]*?(revis|comprob|verifi[cq]|prueba|prob[eé]|valid|evidenc|checked|verified|tested)", re.I | re.M)
+EVIDENCE_MIN_CHARS = 12
+EVIDENCE_HINT = ("a report from a session needs a section that says what you checked and what you did not check: "
+                 "a heading such as «## Qué revisé y qué no» with the tests, queries or screenshots that prove the "
+                 "result (at least %d characters under it). Add it and send the report again." % EVIDENCE_MIN_CHARS)
+
+
+def evidence_missing(text: str) -> bool:
+    """True when the report text has no «what I checked» section with some text under it."""
+    for m in EVIDENCE_HEADING_RE.finditer(text or ""):
+        line_end = text.find("\n", m.end())
+        rest = text[line_end + 1:] if line_end >= 0 else ""
+        tail = text[m.end():line_end if line_end >= 0 else len(text)].split("**", 1)
+        inline = tail[1] if len(tail) > 1 else ""  # «**Qué revisé:** pruebas en verde» keeps the text on the line
+        bold_start = not text[m.start():m.end()].lstrip().startswith("#")
+        # A heading ends the section; a bold-only line ends it only when the section itself began as a bold line.
+        stop = r"^\s*(?:#{1,6}\s|\*\*[^\n]*\*\*\s*$)" if bold_start else r"^\s*#{1,6}\s"
+        nxt = re.search(stop, rest, re.M)
+        body = inline + (rest[:nxt.start()] if nxt else rest)
+        if len(re.sub(r"\s+", "", body)) >= EVIDENCE_MIN_CHARS:
+            return False
+    return True
+
+
+def check_report_evidence(text: str, requester: Optional[str], silent: bool) -> None:
+    """Refuse a session report with no «what I checked» section. Scripts, the release desk and silent notices are
+    exempt: they report machine facts, not work that a person must trust."""
+    if silent or os.environ.get("POLAR_REPORT_EVIDENCE", "").lower() == "off":
+        return
+    from polar.tasks import SESSION_ID
+    parts = (requester or "").split()
+    if parts[:1] == ["prod-op"]:
+        parts = parts[2:]
+    if not parts or not SESSION_ID.fullmatch(parts[0]):
+        return
+    if evidence_missing(text):
+        raise ValueError(EVIDENCE_HINT)
+
+
 def validate_report(links: Any, files: Any, resume: Optional[str], nxt: Any = None) -> Dict[str, Any]:
     """Check the extras of a report card. Return the clean dict. Raise ValueError with a short reason."""
     links, files = list(links or []), list(files or [])

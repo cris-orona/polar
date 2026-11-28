@@ -153,6 +153,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="store the report with no Slack DM: for a notice that needs no action from the owner. "
                          "It shows as a posted report in Mando and on the web page. Not with --file (no thread)")
 
+    rd_ = sub.add_parser("revise-digest", help="the owner's corrections of the last days; --start hands them to a task")
+    rd_.add_argument("--days", type=int, default=7)
+    rd_.add_argument("--start", action="store_true", help="start one owner task that proposes rules from them")
     st = sub.add_parser("status")
     st.add_argument("id")
 
@@ -582,6 +585,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             text = fh.read().strip()
     if args.silent and args.file:
         raise ValueError("--silent sends no DM, so there is no thread for --file; drop one of them")
+    db.check_report_evidence(text, args.requester, args.silent)
     files = []
     for f in args.file:
         path = os.path.abspath(os.path.expanduser(f))
@@ -653,6 +657,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             return cmd_ask(args)
         if args.cmd == "report":
             return cmd_report(args)
+        if args.cmd == "revise-digest":
+            from polar import revise_digest
+            out = revise_digest.run(args.days, send=args.start)
+            if args.start:
+                _out(out)
+            else:
+                print(out["markdown"], end="")
+            return 0 if not args.start or out.get("started") or out["count"] < 2 else 1
         if args.cmd == "status":
             req = db.get(db.connect(), args.id)
             if not req:

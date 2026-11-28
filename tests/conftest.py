@@ -131,3 +131,9 @@ def _no_ambient_session(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(cli, "_parent_pid", lambda pid: None)
     monkeypatch.setattr(cli.os, "getppid", lambda: 0)
+
+
+@pytest.fixture(autouse=True)
+def _report_evidence_off(monkeypatch):
+    """Most tests send short report texts; tests/test_report_evidence.py turns the rule back on."""
+    monkeypatch.setenv("POLAR_REPORT_EVIDENCE", "off")

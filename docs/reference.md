@@ -36,6 +36,18 @@ bin/polar doctor
 bin/polar serve
 ```
 
+### Report evidence and the corrections digest
+
+A report from a session (requester starts with a session id, also after `prod-op <op>`) must have a «what I
+checked» section: a heading or bold line with revisé / comprobé / verificación / pruebas / checked, with at least 12
+characters under it. Polar refuses it otherwise (exit 1, the reason in `error`). Scripts, the release desk and
+`--silent` notices are exempt. Off switch: `POLAR_REPORT_EVIDENCE=off`.
+
+`polar revise-digest [--days 7]` prints the owner's real corrections («Pedir cambios»; a `--next` tap is not one).
+`--start` saves the full list in `data/revise-digest/<date>.md` and starts one owner task through the web API
+(`POLAR_WEB_PORT`): the session groups them and proposes 1–3 rules in one decision card. It starts nothing with fewer
+than 2 corrections. Run it from your own scheduler, for example one weekly job.
+
 ### Pedir cambios
 
 Reply, decision, questions and report cards have a «🔁 Pedir cambios» button. The owner types what to change.
