@@ -185,6 +185,13 @@ Polar only does not see DMs.
   «Sin respuesta de la laptop; abro sesión nueva.». `POLAR_TRIAGE=0` turns triage off. Each pick item has its
   own task, thread and triage. The laptop delivers routed tasks (`polar routes`, then `polar route-done <id>`).
   After delivery the «No, sesión nueva» button does nothing.
+- Status follows the bus: `follow_bus` (tick step, at most once each 60 s, one `agent-bus sessions --json --days 30`
+  call) follows each session to its newest handoff or wake successor. Bus `closed` sets `done`; a `running` task
+  whose session is `parked` sets `parked`; a `parked` task whose successor is live on the server in a `task-*` tmux
+  sets `running` (with the new tmux and session id). A routed task (delivered) whose target closed sets `done` with no
+  Slack change. A laptop task is `done` only when the bus ended it more than 10 min ago. Slack gets an in-place edit
+  of the status message only (never a new post), at most 10 edits in one run. A bus failure changes nothing; `reap`
+  asks the bus before it decides `parked` or `done`. `polar follow-bus [--dry-run]` runs one pass by hand.
 - Placement: the laptop is first, the server is the fallback. A queued task waits `POLAR_LAPTOP_GRACE`
   seconds (120) for the laptop to claim it. The laptop lists the queue with `polar queue --json` (id, text,
   title, thread_ts, created_at, where_hint, overflow) and takes one with `polar claim <id> --host laptop --tab <label> --session <sid>

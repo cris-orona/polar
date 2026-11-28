@@ -30,6 +30,8 @@ log = logging.getLogger("polar")
 # Unset: «el servidor» in texts and `server` as host (POLAR_SERVER_NAME).
 SERVER_NAME = (os.environ.get("POLAR_SERVER_NAME") or "").strip()
 SERVER_LABEL = SERVER_NAME or "el servidor"
+# The host value stored on a task that runs on the always-on server (same rule as the `host` column default).
+SERVER_HOST = "".join(c for c in (SERVER_NAME or "server") if c.isalnum() or c in "-_.") or "server"
 # launchd label of the coord-tick agent: the watchdog text tells the owner how to kick it.
 COORD_TICK_LABEL = os.environ.get("POLAR_COORD_TICK_LABEL") or "coord-tick"
 DEFAULT_WHERE = "laptop" if os.environ.get("POLAR_DEFAULT_WHERE") == "laptop" else "server"
@@ -100,6 +102,10 @@ def card_has_reader(req: Optional[Dict[str, Any]]) -> bool:
     router run that made it ended when it sent the card, even when Polar wrote that run's session id on it."""
     return bool(req) and not req.get("agent_where") and has_session(req.get("requester"))
 OWNER_DM = os.environ.get("POLAR_OWNER_DM") or "D0000000000"  # the owner's DM channel with the bot
+FOLLOW_BUS_EVERY = 60        # seconds between two runs of follow_bus (one bus call each)
+FOLLOW_BUS_EDITS_MAX = 10    # Slack edits that one follow_bus run may make; the rest waits for the next run
+FOLLOW_BUS_DAYS = 30         # how far back the bus sessions call looks
+LAPTOP_CLOSE_GRACE = 600     # a laptop task is «done» by the bus only 10 min after the session ended
 COORD_CHECK_EVERY = 300      # seconds between two looks at the coord-tick heartbeat
 COORD_STALE = 15 * 60        # coord-tick ticks every 20 s: 15 min without a beat means it stopped
 COORD_REPEAT = 2 * 3600      # at most one alarm DM per 2 h while it stays stopped
@@ -265,6 +271,7 @@ class Tasks:
         self.fetch = fetch  # None: files.download (Slack, bot token then user token)
         self.sleep = sleep
         self._coord_checked = time.time()  # first look after COORD_CHECK_EVERY: coord-tick beats again after a reboot
+        self._follow_at: Optional[float] = None  # monotonic time of the last follow_bus run; None: not run yet
         self._coord_alert_at: Optional[float] = None  # when the last alarm went; None: no alarm open
         self.intake: Callable[[Dict[str, Any]], Any] = self.on_message  # Polar sets its own entry here
         self._type_fails: Dict[str, int] = {}  # request id -> failed tries to type its answer
@@ -483,7 +490,7 @@ class Tasks:
                 if not sid or not re.fullmatch(r"[\w-]{4,64}", str(sid)):
                     continue
                 row = self.bus_json("session", str(sid), deadline=deadline)
-                if isinstance(row, dict) and row.get("state") in ("live", "parked"):
+                if isinstance(row, dict) and bus_state(row) in ("live", "parked"):
                     label = row.get("title") or row.get("tmux") or str(sid)[:8]
                     return str(sid), str(label)
         return None
@@ -1186,7 +1193,7 @@ class Tasks:
 
     # -- the loop ----------------------------------------------------------
     def tick(self) -> None:
-        for step in (self.catch_up_due, self.reap, self.process_triage, self.expire_triage, self.process_plans, self.expire_plans, self.launch_queued, self.deliver_steers, self.sweep_steers, self.notify_steers, self.notify_claims,
+        for step in (self.catch_up_due, self.reap, self.follow_bus, self.process_triage, self.expire_triage, self.process_plans, self.expire_plans, self.launch_queued, self.deliver_steers, self.sweep_steers, self.notify_steers, self.notify_claims,
                      self.refresh_final, self.notify_outcomes, self.watch_coord):
             try:
                 step()
@@ -1226,20 +1233,139 @@ class Tasks:
         live = self.live_sessions()
         if live is None:
             return
-        for t in self.rows("task", "running"):
-            if t["host"] == "laptop" or t["tmux"] in live:
-                continue  # a laptop task has no tmux session here: the laptop reports its end
+        gone = [t for t in self.rows("task", "running") if t["host"] != "laptop" and t["tmux"] not in live]
+        # a laptop task has no tmux session here: the laptop reports its end
+        if not gone:
+            return
+        bus = self.bus_rows()  # one call; None on a failure: the marker rule below decides alone
+        for t in gone:
+            row = resolve_session(bus, t.get("session_id")) if bus is not None else None
             marker = self.parked_dir() / t["tmux"]
-            if marker.exists():
+            state = bus_state(row) if row else None
+            if state == "live" and server_tmux(row) and row.get("tmux") != t["tmux"]:
+                self.update(t["id"], tmux=row["tmux"], session_id=row["session_id"])  # a wake gave it a new tmux
+                continue
+            if state == "parked" or (state is None and marker.exists()):
                 self.update(t["id"], status="parked", finished_at=db.now_iso())
                 try:
                     marker.unlink()
                 except OSError:
                     pass
-                self.status_line(t["id"], "🅿️ En pausa. Se reanuda cuando llegue su espera.")
+                self.status_line(t["id"], PARKED_LINE)
             else:
                 self.update(t["id"], status="done", finished_at=db.now_iso())
                 self.finish_line(self.get(t["id"]) or t)
+
+    # -- the bus is the truth about a session ---------------------------------------
+    def bus_rows(self, days: int = FOLLOW_BUS_DAYS) -> Optional[Dict[str, Dict[str, Any]]]:
+        """All bus sessions of the last `days` days by session id, or None when the call fails or gives no rows."""
+        rc, out = self.sh([self.bus_bin(), "sessions", "--json", "--days", str(days)], 20)
+        if rc != 0:
+            return None
+        rows: Dict[str, Dict[str, Any]] = {}
+        for ln in (out or "").splitlines():
+            try:
+                r = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(r, dict) and r.get("session_id"):
+                rows[str(r["session_id"])] = r
+        return rows or None
+
+    def follow_bus(self, force: bool = False, dry_run: bool = False) -> List[Dict[str, Any]]:
+        """Make the status of each task follow the bus state of its session. At most once each FOLLOW_BUS_EVERY
+        (`force` skips the gate). A bus failure changes nothing. A Slack edit happens only in place (the task has
+        a status message); this step never posts. At most FOLLOW_BUS_EDITS_MAX edits in one run. With `dry_run`
+        nothing changes. Returns the changes."""
+        now = time.monotonic()
+        if not force and self._follow_at is not None and now - self._follow_at < FOLLOW_BUS_EVERY:
+            return []
+        self._follow_at = now
+        todo = [t for t in self.rows("task", "running", "parked", "routed")
+                if (t.get("match_session") if t["status"] == "routed" else t.get("session_id"))]
+        if not todo:
+            return []  # nothing to follow: no bus call
+        bus = self.bus_rows()
+        if bus is None:
+            return []
+        changes: List[Dict[str, Any]] = []
+        edits = 0
+        for t in todo:
+            ch = self.follow_plan(t, bus)
+            if not ch:
+                continue
+            if ch["edit"]:
+                if edits >= FOLLOW_BUS_EDITS_MAX:
+                    continue
+                edits += 1
+            changes.append(ch)
+            if dry_run:
+                continue
+            log.info("follow_bus: task %s %s -> %s (bus %s)", t["id"], ch["old"], ch["new"], ch["bus"])
+            self.update(t["id"], **ch["fields"])
+            if ch["text"]:
+                self.edit_in_place(t, ch["text"])
+        return [{k: v for k, v in c.items() if k not in ("fields", "text")} for c in changes]
+
+    def follow_plan(self, t: Dict[str, Any], bus: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        st = t["status"]
+        sid = t.get("match_session") if st == "routed" else t.get("session_id")
+        if st == "routed" and not t.get("route_done"):
+            return None
+        if not sid:
+            return None
+        row = resolve_session(bus, sid)
+        if not row:
+            return None  # unknown session: leave the task alone
+        state = bus_state(row)
+        fields: Dict[str, Any] = {}
+        text = ""
+        new = st
+        if t["host"] == "laptop":
+            if st == "routed" or state != "closed":
+                return None
+            ended = parse_iso(row.get("ended_at"))
+            if ended is None or time.time() - ended < LAPTOP_CLOSE_GRACE:
+                return None
+            new = "done"
+        elif state == "closed":
+            new = "done"
+        elif st == "running" and state == "parked":
+            new, text = "parked", PARKED_LINE
+        elif st in ("running", "parked") and state == "live" and server_tmux(row):
+            if st == "parked":
+                new, text = "running", "▶️ Corre otra vez."
+            if row["tmux"] != t.get("tmux") or row["session_id"] != t.get("session_id"):
+                new = "running"
+                fields.update(tmux=row["tmux"], session_id=row["session_id"])
+        if new == st and not fields:
+            return None
+        if new == "done":
+            if st != "routed":
+                text = self.done_text(t)
+            if not t.get("finished_at"):
+                fields["finished_at"] = db.now_iso()
+        if new != st:
+            fields["status"] = new
+        edit = bool(text) and self.can_edit(t, text)
+        if text:
+            fields["status_text"] = text
+        return {"task": t["id"], "old": st, "new": new, "bus": state, "edit": edit,
+                "fields": fields, "text": text}
+
+    def can_edit(self, t: Dict[str, Any], text: str) -> bool:
+        return bool(t.get("status_ts")) and self.notices_on() and self.bot is not None \
+            and t.get("status_text") != text
+
+    def edit_in_place(self, t: Dict[str, Any], text: str) -> None:
+        """Edit the status message of a task. Never post: no message, no edit. status_text is stored already."""
+        if not self.can_edit(t, text):
+            return
+        try:
+            self.bot.chat_update(channel=t["channel"], ts=t["status_ts"], text=text,
+                                 blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": text}}])
+        except Exception as exc:
+            log.warning("status edit failed for task %s: %s", t["id"], _code(exc))
 
     def launch_queued(self) -> None:
         live = self.live_sessions()
@@ -1709,6 +1835,56 @@ def public_triage(t: Dict[str, Any]) -> Dict[str, Any]:
 def public_route(t: Dict[str, Any]) -> Dict[str, Any]:
     return {k: t.get(k) for k in ("id", "text", "thread_ts", "channel", "match_session", "match_label",
                                   "match_reason", "created_at")}
+
+
+PARKED_LINE = "🅿️ En pausa. Se reanuda cuando llegue su espera."
+
+
+def bus_state(row: Dict[str, Any]) -> str:
+    """live, parked or closed. The `state` key when the row has it (sessions --json); `agent-bus session <id>` has
+    none, so derive it: parked wins over closed."""
+    st = row.get("state")
+    if st in ("live", "parked", "closed"):
+        return st
+    if row.get("parked_at"):
+        return "parked"
+    if row.get("ended_at"):
+        return "closed"
+    return "live"
+
+
+def parse_iso(v: Any) -> Optional[float]:
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.timestamp()
+
+
+def resolve_session(rows: Dict[str, Dict[str, Any]], sid: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The newest successor of session `sid` (a handoff or a wake makes a new row with handoff_from = the old id),
+    or the row itself, or None when the bus does not know it."""
+    if not sid or sid not in rows:
+        return None
+    kids: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows.values():
+        if r.get("handoff_from"):
+            kids.setdefault(str(r["handoff_from"]), []).append(r)
+    cur, seen = rows[sid], {sid}
+    while True:
+        nxt = [r for r in kids.get(str(cur["session_id"]), []) if str(r["session_id"]) not in seen]
+        if not nxt:
+            return cur
+        cur = max(nxt, key=lambda r: str(r.get("last_seen") or r.get("ended_at") or ""))
+        seen.add(str(cur["session_id"]))
+
+
+def server_tmux(row: Dict[str, Any]) -> bool:
+    return row.get("host") == SERVER_HOST and str(row.get("tmux") or "").startswith("task-")
 
 
 def _epoch(iso: str) -> float:

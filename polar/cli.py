@@ -251,6 +251,8 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("id")
     ps.add_argument("--file", default="-")
 
+    fb = sub.add_parser("follow-bus", help="make task statuses follow the agent-bus state (one pass, no 60 s gate)")
+    fb.add_argument("--dry-run", action="store_true", help="print the planned changes as JSON; change nothing")
     sub.add_parser("expire")
     sub.add_parser("serve")
     demo = sub.add_parser("demo", help="the web UI on sample data: no Slack, nothing is sent")
@@ -721,6 +723,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 for r in rows:
                     print("%s  %-8s %s  %s" % (r["id"], r["status"], r["tmux"] or "-", r["title"]))
+            return 0
+        if args.cmd == "follow-bus":
+            from polar.tasks import Tasks
+            _out(Tasks(db.connect(), None, "").follow_bus(force=True, dry_run=args.dry_run))
             return 0
         if args.cmd == "steers":
             from polar.tasks import Tasks
