@@ -380,7 +380,12 @@ def card_html(card: Dict[str, Any], allow_send: bool, focus: bool = False, on_pa
     if kind in db.REPLY_KINDS:
         parts.append(_original(card))
     parts.append(links_html(card) + files_html(card))
-    if live:
+    if live and card["status"] == "pending":
+        # Not delivered yet: the core acts only on a delivered card, so the web shows it without buttons.
+        if kind in db.REPLY_KINDS:
+            parts.append('<div class="draft">%s</div>' % plain(card.get("final_text") or card.get("draft_text")))
+        parts.append('<p class="outcome">%s</p>' % esc(t("not_delivered")))
+    elif live:
         if kind == "decision":
             parts.append(_decision_actions(card))
         elif kind == "questions":
