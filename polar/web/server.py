@@ -31,7 +31,7 @@ INLINE_OK = {"image/png", "image/jpeg", "image/gif", "image/webp", "text/plain"}
 CHUNK = 64 * 1024
 STATIC_FILES = {"app.css": "text/css; charset=utf-8", "app.js": "text/javascript; charset=utf-8"}
 ACTIONS = ("choose", "answer", "send", "discard", "revise", "next", "seen")
-COOKIE = "polar_ui"
+COOKIE = "polar_ui"  # the cookie name is COOKIE + "_<port>": browsers share cookies across the ports of one host
 COOKIE_MAX_AGE = 180 * 24 * 3600  # seconds: about six months
 PUBLIC = ("/healthz", "/login")  # with /static/: the only paths that need no session cookie
 LOGIN_CMD = "polar ui-url"
@@ -170,6 +170,7 @@ class UIServer(ThreadingHTTPServer):
         self.polar, self.demo = polar, demo
         self.data_dir = Path(data_dir) if data_dir else db.data_dir()
         self.port = self.server_address[1]
+        self.cookie = "%s_%d" % (COOKIE, self.port)
         self.secret = webapi.load_token(secret_path(self.data_dir))
         self.login, self.session = login_token(self.secret), session_value(self.secret)
         extra = [h.strip().lower() for h in (os.environ.get("POLAR_UI_HOSTS") or "").split(",") if h.strip()]
@@ -272,7 +273,8 @@ class Handler(webapi.CloseOnError):
             jar = SimpleCookie(self.headers.get("Cookie") or "")
         except CookieError:
             return False
-        got = jar[COOKIE].value if COOKIE in jar else ""
+        name = self.server.cookie
+        got = jar[name].value if name in jar else ""
         return bool(got) and hmac.compare_digest(got.encode("utf-8"), self.server.session.encode("utf-8"))
 
     def _need_login(self, path: str) -> None:
@@ -284,7 +286,10 @@ class Handler(webapi.CloseOnError):
     def _login(self, token: str) -> None:
         if not token or not hmac.compare_digest(token.encode("utf-8"), self.server.login.encode("utf-8")):
             return self._send(403, views.login_page(t("login_bad"), LOGIN_CMD))
-        cookie = "%s=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=%d" % (COOKIE, self.server.session, COOKIE_MAX_AGE)
+        # Lax, not Strict: a link to a card from the chat app is a cross-site navigation and must keep the session.
+        # POST stays safe: it needs a same-site Origin, the CSRF token and a JSON body.
+        cookie = "%s=%s; HttpOnly; SameSite=Lax; Path=/; Max-Age=%d" % (self.server.cookie, self.server.session,
+                                                                         COOKIE_MAX_AGE)
         self._send(303, "", "text/plain; charset=utf-8", {"Location": "/", "Set-Cookie": cookie})
 
     # -- verbs ---------------------------------------------------------------------------------------------------------
