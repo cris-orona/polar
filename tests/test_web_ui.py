@@ -835,3 +835,103 @@ def test_pending_card_is_read_only(ui, conn, decision_id, reply_id):
     page = call(ui, "GET", "/")[1].decode()
     start = page.index('id="c-%s"' % decision_id)
     assert "data-action" in page[start:page.index("</article>", start)]
+
+
+# -- request framing (no second request hidden in a body) ----------------------------------------------------------------
+def _framed(ui, first, n_inner_len=True):
+    """`first` is a request head with "@@" for the host and "##" for the inner length; a second request follows."""
+    inner = b"GET /history HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nCookie: %s\r\n\r\n" % (ui.port, session_cookie(ui).encode())
+    head = first.replace(b"@@", b"127.0.0.1:%d" % ui.port).replace(b"##", b"%d" % len(inner))
+    return raw(ui.port, head + inner)
+
+
+@pytest.mark.parametrize("first", [
+    b"POST /api/act HTTP/1.1\r\nHost: @@\r\nTransfer-Encoding: chunked\r\nContent-Length: ##\r\n\r\n",  # (a)
+    b"GET /healthz HTTP/1.1\r\nHost: @@\r\nTransfer-Encoding: chunked\r\n\r\n",  # (a)
+    b"GET /healthz HTTP/1.1\r\nHost: @@\r\nContent-Length: 0\r\nContent-Length: ##\r\n\r\n",  # (b)
+    b"POST /api/act HTTP/1.1\r\nHost: @@\r\nContent-Length: 3_2\r\n\r\n",  # (c)
+    b"POST /api/act HTTP/1.1\r\nHost: @@\r\nContent-Length: +32\r\n\r\n",  # (c)
+    b"POST /api/act HTTP/1.1\r\nHost: @@\r\nContent-Length: 32 \r\n\r\n",  # (c)
+    b"POST /api/act HTTP/1.1\r\nHost: @@\r\nContent-Length: -1\r\n\r\n",  # (c)
+    b"POST /api/act HTTP/1.1\r\nHost: @@\r\nContent-Length: 12345678\r\n\r\n",  # (c)
+    b"GET /healthz HTTP/1.1\r\nHost: @@\r\nContent-Length: ##\r\n\r\n",  # (d)
+    b"HEAD /healthz HTTP/1.1\r\nHost: @@\r\nContent-Length: ##\r\n\r\n",  # (d)
+])
+def test_bad_framing_is_refused_and_closes(ui, first):
+    out, closed = _framed(ui, first)
+    assert out.count(b"HTTP/1.1 ") == 1 and out.startswith(b"HTTP/1.1 400") and closed
+
+
+def test_duplicate_length_on_a_good_post_is_refused(ui, conn, decision_id):
+    show(conn, decision_id)
+    body = json.dumps({"id": decision_id, "action": "choose", "option": "go"}).encode()
+    inner = b"GET /history HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n" % ui.port
+    req = (b"POST /api/act HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nOrigin: http://127.0.0.1:%d\r\nCookie: %s\r\n"
+           b"X-CSRF-Token: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nContent-Length: %d\r\n\r\n"
+           % (ui.port, ui.port, session_cookie(ui).encode(), ui.csrf().encode(), len(body), len(body) + len(inner)))
+    out, closed = raw(ui.port, req + body + inner)
+    assert out.count(b"HTTP/1.1 ") == 1 and out.startswith(b"HTTP/1.1 400") and closed
+    assert db.get(conn, decision_id)["status"] == "shown"
+
+
+def test_answer_before_the_body_is_read_closes(ui, monkeypatch):
+    """Backstop: a route that answers without reading the declared body still closes the connection."""
+    monkeypatch.setattr(server.Handler, "do_POST", lambda self: self._json(200, {"ok": True}))
+    out, closed = _framed(ui, b"POST /api/act HTTP/1.1\r\nHost: @@\r\nContent-Length: ##\r\n\r\n")
+    assert out.count(b"HTTP/1.1 ") == 1 and out.startswith(b"HTTP/1.1 200") and closed
+    assert b"Connection: close" in out
+
+
+def test_good_post_keeps_the_connection(ui, conn, decision_id):
+    show(conn, decision_id)
+    body = json.dumps({"id": decision_id, "action": "choose", "option": "go"}).encode()
+    req = (b"POST /api/act HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nOrigin: http://127.0.0.1:%d\r\nCookie: %s\r\n"
+           b"X-CSRF-Token: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n"
+           % (ui.port, ui.port, session_cookie(ui).encode(), ui.csrf().encode(), len(body)))
+    nxt = b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: close\r\n\r\n" % ui.port
+    out, closed = raw(ui.port, req + body + nxt)
+    assert out.count(b"HTTP/1.1 200") == 2 and closed
+
+
+# -- errors after the headers, odd digits -----------------------------------------------------------------
+def test_read_error_after_headers_only_closes(ui, conn, data, monkeypatch):
+    f = data / "files" / "big.bin"
+    f.write_bytes(b"a" * (server.CHUNK * 2))
+    rid = report(conn, files=[str(f)])
+    real_open = open
+
+    class Broken:
+        def __init__(self, fh):
+            self.fh, self.n = fh, 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.fh.close()
+
+        def fileno(self):
+            return self.fh.fileno()
+
+        def read(self, n=-1):
+            self.n += 1
+            if self.n > 1:
+                raise OSError("disk gone")
+            return self.fh.read(n)
+
+    monkeypatch.setattr(server, "open", lambda p, m="r", *a, **k: Broken(real_open(p, m, *a, **k)), raising=False)
+    out, closed = raw(ui.port, b"GET /files/%s/0 HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nCookie: %s\r\n\r\n"
+                      % (rid.encode(), ui.port, session_cookie(ui).encode()))
+    assert out.startswith(b"HTTP/1.1 200") and out.count(b"HTTP/1.1 ") == 1 and closed
+    assert b"500" not in out and strings.t("err_internal").encode() not in out
+
+
+@pytest.mark.parametrize("n", [b"\xb2", b"1\xb2", b"\xb9", b"%C2%B2", b"+0"])
+def test_file_index_must_be_ascii_digits(ui, conn, data, n):
+    """The request line is read as Latin-1, so the raw byte B2 is "²": str.isdigit() says True, int() fails."""
+    f = data / "files" / "a.txt"
+    f.write_text("a")
+    rid = report(conn, files=[str(f)])
+    out, _ = raw(ui.port, b"GET /files/%s/%s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nCookie: %s\r\nConnection: close\r\n\r\n"
+                 % (rid.encode(), n, ui.port, session_cookie(ui).encode()))
+    assert out.startswith(b"HTTP/1.1 404")

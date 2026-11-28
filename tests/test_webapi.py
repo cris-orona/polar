@@ -378,3 +378,46 @@ def test_error_response_closes_the_connection(web):
     out, closed = _raw(port, req)
     assert out.count(b"HTTP/1.1 ") == 1 and out.startswith(b"HTTP/1.1 403") and closed
     assert b"Connection: close" in out
+
+
+def _framed(web, first):
+    """`first` is a request head with "@@" for the host and "##" for the inner length; a second request follows."""
+    port = web.server_address[1]
+    inner = b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nAuthorization: Bearer %s\r\n\r\n" % (port, TOKEN.encode())
+    head = first.replace(b"@@", b"127.0.0.1:%d\r\nAuthorization: Bearer %s" % (port, TOKEN.encode()))
+    return _raw(port, head.replace(b"##", b"%d" % len(inner)) + inner)
+
+
+@pytest.mark.parametrize("first", [
+    b"POST /act HTTP/1.1\r\nHost: @@\r\nTransfer-Encoding: chunked\r\nContent-Length: ##\r\n\r\n",  # (a)
+    b"GET /health HTTP/1.1\r\nHost: @@\r\nTransfer-Encoding: chunked\r\n\r\n",  # (a)
+    b"GET /health HTTP/1.1\r\nHost: @@\r\nContent-Length: 0\r\nContent-Length: ##\r\n\r\n",  # (b)
+    b"POST /act HTTP/1.1\r\nHost: @@\r\nContent-Length: 3_2\r\n\r\n",  # (c)
+    b"POST /act HTTP/1.1\r\nHost: @@\r\nContent-Length: +32\r\n\r\n",  # (c)
+    b"POST /act HTTP/1.1\r\nHost: @@\r\nContent-Length: 32 \r\n\r\n",  # (c)
+    b"POST /act HTTP/1.1\r\nHost: @@\r\nContent-Length: -1\r\n\r\n",  # (c)
+    b"GET /health HTTP/1.1\r\nHost: @@\r\nContent-Length: ##\r\n\r\n",  # (d)
+    b"HEAD /health HTTP/1.1\r\nHost: @@\r\nContent-Length: ##\r\n\r\n",  # (d)
+])
+def test_bad_framing_is_refused_and_closes(web, first):
+    out, closed = _framed(web, first)
+    assert out.count(b"HTTP/1.1 ") == 1 and out.startswith(b"HTTP/1.1 400") and closed
+
+
+def test_duplicate_length_on_a_good_post_is_refused(web, polar, conn):
+    rid = db.create_request(conn, "decision", "¿Sí?", "", "s1", options=[{"key": "a", "label": "A"}, {"key": "b", "label": "B"}])
+    shown(polar, rid)
+    port = web.server_address[1]
+    body = json.dumps({"id": rid, "action": "choose", "option": "a"}).encode()
+    inner = b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nAuthorization: Bearer %s\r\n\r\n" % (port, TOKEN.encode())
+    req = (b"POST /act HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\n"
+           b"Content-Length: %d\r\nContent-Length: %d\r\n\r\n" % (port, TOKEN.encode(), len(body), len(body) + len(inner)))
+    out, closed = _raw(port, req + body + inner)
+    assert out.count(b"HTTP/1.1 ") == 1 and out.startswith(b"HTTP/1.1 400") and closed
+    assert db.get(conn, rid)["status"] == "shown"
+
+
+def test_answer_before_the_body_is_read_closes(web, monkeypatch):
+    monkeypatch.setattr(webapi._Handler, "do_POST", lambda self: self._json(200, {"ok": True}))
+    out, closed = _framed(web, b"POST /act HTTP/1.1\r\nHost: @@\r\nContent-Length: ##\r\n\r\n")
+    assert out.count(b"HTTP/1.1 ") == 1 and out.startswith(b"HTTP/1.1 200") and closed

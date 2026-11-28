@@ -8,6 +8,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import uuid
@@ -285,13 +286,52 @@ def _answer(polar: Polar, req: Dict[str, Any], body: Dict[str, Any]) -> None:
     polar.on_q_send(owner, rid, src=SRC)
 
 
+LENGTH_RE = re.compile(r"[0-9]{1,7}")
+
+
 class CloseOnError(BaseHTTPRequestHandler):
-    """Close the connection after every error answer. An early refusal does not read the request body, so on a
-    kept-alive connection that body would be parsed as the next request (request smuggling)."""
+    """Request framing for both local servers, in one place.
+
+    On a kept-alive connection, a body that was not read would be parsed as the next request (request smuggling).
+    So: `parse_request` refuses, before any route or auth logic, every request whose body length is not one plain
+    Content-Length (no Transfer-Encoding, no second Content-Length, digits only, none on GET or HEAD). Every answer
+    with status 400 or more closes the connection. As a backstop, an answer sent before the declared body was read
+    with `read_body` closes the connection too, so a new route cannot bring the bug back."""
+
+    body_left = 0  # bytes of the declared body not read yet
+    response_started = False  # True once a status line went out for this request
+
+    def parse_request(self) -> bool:
+        self.body_left, self.response_started = 0, False
+        if not super().parse_request():
+            return False
+        lengths = self.headers.get_all("Content-Length") or []
+        bad = bool(self.headers.get_all("Transfer-Encoding")) or len(lengths) > 1
+        if not bad and lengths:
+            bad = not LENGTH_RE.fullmatch(lengths[0])
+            if not bad:
+                self.body_left = int(lengths[0])
+                bad = self.command in ("GET", "HEAD") and self.body_left != 0
+        if bad:
+            self.body_left = 0
+            self.send_error(400)
+            return False
+        return True
+
+    def body_length(self) -> Optional[int]:
+        """The declared body length (already checked by `parse_request`), or None without Content-Length."""
+        got = self.headers.get("Content-Length")
+        return int(got) if got is not None else None
+
+    def read_body(self, length: int) -> bytes:
+        data = self.rfile.read(length)
+        self.body_left = max(0, self.body_left - len(data))
+        return data
 
     def send_response(self, code: int, message: Optional[str] = None) -> None:
         super().send_response(code, message)
-        if code >= 400:
+        self.response_started = True
+        if code >= 400 or self.body_left:
             self.close_connection = True
             self.send_header("Connection", "close")
 
@@ -334,7 +374,7 @@ class _Handler(CloseOnError):
             return False
         return True
 
-    def do_GET(self) -> None:
+    def do_GET(self) -> None:  # framing is checked first, in CloseOnError.parse_request
         if not self._guard():
             return
         if self.path == "/health":
@@ -348,17 +388,15 @@ class _Handler(CloseOnError):
         if self.path != "/act":
             self._json(404, {"ok": False, "error": "No existe."})
             return
-        try:
-            length = int(self.headers.get("Content-Length") or "")
-        except ValueError:
+        length = self.body_length()
+        if length is None:
             self._json(400, {"ok": False, "error": "Falta Content-Length."})
             return
-        if length < 0 or length > MAX_BODY:
-            self.close_connection = True
+        if length > MAX_BODY:
             self._json(413, {"ok": False, "error": "Cuerpo demasiado grande."})
             return
         try:
-            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            body = json.loads(self.read_body(length).decode("utf-8"))
             if not isinstance(body, dict):
                 raise ValueError
         except ValueError:
