@@ -31,6 +31,7 @@ def esc(value: Any) -> str:
 
 LT, AMP = "", ""  # private-use marks: raw < and & never reach the Markdown parser as HTML
 HREF_RE = re.compile(r'href="([^"]*)"')
+ANCHOR_RE = re.compile(r"<a\b[^>]*>")  # raw "<" in the source is a placeholder, so each match comes from Markdown
 IMG_RE = re.compile(r'<img\b[^>]*?\balt="([^"]*)"[^>]*?/?>|<img\b[^>]*?/?>')
 LIST_GAP_RE = re.compile(r"(?m)^(?![ \t]*(?:[-*+]|\d+[.)])[ \t])([^\n|>#`][^\n]*)\n(?=[ \t]*(?:[-*+]|\d+[.)])[ \t]+\S)")
 WRAPPER_RE = re.compile(r"</?agent-message\b[^>\n]{0,300}?>", re.I)
@@ -46,8 +47,11 @@ def safe_url(url: str) -> bool:
     u = html.unescape(url).strip()
     if re.search(r"[\x00-\x1f\s]", u):
         return False
-    if u.startswith("/") and not u.startswith("//") or u.startswith("#"):
+    if u.startswith("#"):
         return True
+    if u.startswith("/"):
+        # Browsers read a backslash as "/", so "/\host" is "//host": no backslash before the next "/".
+        return not u.startswith("//") and "\\" not in u[1:].split("/", 1)[0]
     return urlparse(u).scheme.lower() in ("http", "https")
 
 
@@ -66,7 +70,7 @@ def md(text: Any) -> str:
     src = src.replace("&", AMP).replace("<", LT)
     out = markdown.markdown(src, extensions=["tables", "fenced_code", "sane_lists"], output_format="html")
     out = IMG_RE.sub(lambda m: m.group(1) or "", out)
-    out = HREF_RE.sub(_fix_href, out)
+    out = ANCHOR_RE.sub(lambda m: HREF_RE.sub(_fix_href, m.group(0)), out)  # links only, never their text
     return '<div class="md">%s</div>' % out.replace(LT, "&lt;").replace(AMP, "&amp;")
 
 
