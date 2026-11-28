@@ -105,6 +105,9 @@ OWNER_DM = os.environ.get("POLAR_OWNER_DM") or "D0000000000"  # the owner's DM c
 FOLLOW_BUS_EVERY = 60        # seconds between two runs of follow_bus (one bus call each)
 FOLLOW_BUS_EDITS_MAX = 10    # Slack edits that one follow_bus run may make; the rest waits for the next run
 FOLLOW_BUS_DAYS = 30         # how far back the bus sessions call looks
+CLOSE_GRACE = 120            # a bus close counts only after 2 min (a handoff successor may not exist yet)
+REVIVE_DAYS = 3              # a done task whose session runs again shows «running» for 3 days after it ended
+FOLLOW_QUIET = 120           # follow_bus leaves a row alone for 2 min after any other change
 LAPTOP_CLOSE_GRACE = 600     # a laptop task is «done» by the bus only 10 min after the session ended
 COORD_CHECK_EVERY = 300      # seconds between two looks at the coord-tick heartbeat
 COORD_STALE = 15 * 60        # coord-tick ticks every 20 s: 15 min without a beat means it stopped
@@ -1242,7 +1245,11 @@ class Tasks:
             row = resolve_session(bus, t.get("session_id")) if bus is not None else None
             marker = self.parked_dir() / t["tmux"]
             state = bus_state(row) if row else None
-            if state == "live" and server_tmux(row) and row.get("tmux") != t["tmux"]:
+            if state == "closed":
+                ended = parse_iso(row.get("ended_at"))
+                if ended is not None and time.time() - ended < CLOSE_GRACE:
+                    continue  # too fresh (a handoff successor may not exist yet): look again next run
+            if state == "live" and server_tmux(row) and row.get("tmux") != t["tmux"] and row["tmux"] in live:
                 self.update(t["id"], tmux=row["tmux"], session_id=row["session_id"])  # a wake gave it a new tmux
                 continue
             if state == "parked" or (state is None and marker.exists()):
@@ -1283,17 +1290,37 @@ class Tasks:
         self._follow_at = now
         todo = [t for t in self.rows("task", "running", "parked", "routed")
                 if (t.get("match_session") if t["status"] == "routed" else t.get("session_id"))]
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=REVIVE_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        held = {t["session_id"] for t in todo if t["status"] != "routed"}  # an open task already shows this session
+        newest: Dict[str, Dict[str, Any]] = {}  # one done task for each session id: the newest
+        for t in self.rows("task", "done"):
+            if (t["host"] == SERVER_HOST and t.get("session_id") and t["session_id"] not in held
+                    and (t.get("finished_at") or "") >= cutoff):
+                newest[t["session_id"]] = t  # rows come oldest first
+        todo += list(newest.values())
         if not todo:
             return []  # nothing to follow: no bus call
         bus = self.bus_rows()
         if bus is None:
             return []
+        live = set(self.live_sessions() or [])  # «running» needs a tmux that exists here, not only a bus row
+        for t in todo:  # an open task also shows the session its id resolves to (its newest successor)
+            if t["status"] in ("running", "parked"):
+                r = resolve_session(bus, t.get("session_id"))
+                if r:
+                    held.add(str(r["session_id"]))
         changes: List[Dict[str, Any]] = []
         edits = 0
         for t in todo:
-            ch = self.follow_plan(t, bus)
+            if time.time() - _epoch(t.get("updated_at") or "") < FOLLOW_QUIET:
+                continue  # another path (launch, claim, route-done, a steer) may be moving it
+            ch = self.follow_plan(t, bus, live)
             if not ch:
                 continue
+            if t["status"] == "done" and ch["fields"].get("session_id", t["session_id"]) in held:
+                continue  # its successor already shows on another open task: do not show it twice
+            if t["status"] == "done":
+                held.add(ch["fields"].get("session_id", t["session_id"]))
             if ch["edit"]:
                 if edits >= FOLLOW_BUS_EDITS_MAX:
                     continue
@@ -1301,13 +1328,19 @@ class Tasks:
             changes.append(ch)
             if dry_run:
                 continue
+            fields = dict(ch["fields"], updated_at=db.now_iso())
+            cur = self.conn.execute("UPDATE tasks SET %s WHERE id=? AND status=?" % ", ".join(k + "=?" for k in fields),
+                                    list(fields.values()) + [t["id"], t["status"]])
+            if cur.rowcount != 1:
+                continue  # the row moved under us: skip it and its edit
             log.info("follow_bus: task %s %s -> %s (bus %s)", t["id"], ch["old"], ch["new"], ch["bus"])
-            self.update(t["id"], **ch["fields"])
             if ch["text"]:
                 self.edit_in_place(t, ch["text"])
         return [{k: v for k, v in c.items() if k not in ("fields", "text")} for c in changes]
 
-    def follow_plan(self, t: Dict[str, Any], bus: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def follow_plan(self, t: Dict[str, Any], bus: Dict[str, Dict[str, Any]],
+                    live: Optional[set] = None) -> Optional[Dict[str, Any]]:
+        """The change that makes task `t` match its bus session, or None. `live`: the task-* tmux names here."""
         st = t["status"]
         sid = t.get("match_session") if st == "routed" else t.get("session_id")
         if st == "routed" and not t.get("route_done"):
@@ -1318,6 +1351,7 @@ class Tasks:
         if not row:
             return None  # unknown session: leave the task alone
         state = bus_state(row)
+        up = state == "live" and server_tmux(row) and row["tmux"] in (live or ())  # a stale «live» row has no tmux
         fields: Dict[str, Any] = {}
         text = ""
         new = st
@@ -1328,11 +1362,19 @@ class Tasks:
             if ended is None or time.time() - ended < LAPTOP_CLOSE_GRACE:
                 return None
             new = "done"
+        elif st == "done":
+            if not up:
+                return None
+            new, text = "running", "▶️ Corre otra vez."  # a relay resumed it: same id, live again
+            fields.update(tmux=row["tmux"], session_id=row["session_id"], finished_at=None)
         elif state == "closed":
+            ended = parse_iso(row.get("ended_at"))
+            if ended is not None and time.time() - ended < CLOSE_GRACE:
+                return None  # an ended_at that does not parse counts as old: the task must not run for ever
             new = "done"
         elif st == "running" and state == "parked":
             new, text = "parked", PARKED_LINE
-        elif st in ("running", "parked") and state == "live" and server_tmux(row):
+        elif st in ("running", "parked") and up:
             if st == "parked":
                 new, text = "running", "▶️ Corre otra vez."
             if row["tmux"] != t.get("tmux") or row["session_id"] != t.get("session_id"):
@@ -1340,7 +1382,7 @@ class Tasks:
                 fields.update(tmux=row["tmux"], session_id=row["session_id"])
         if new == st and not fields:
             return None
-        if new == "done":
+        if new == "done" and st != "done":
             if st != "routed":
                 text = self.done_text(t)
             if not t.get("finished_at"):
@@ -1879,7 +1921,7 @@ def resolve_session(rows: Dict[str, Dict[str, Any]], sid: Optional[str]) -> Opti
         nxt = [r for r in kids.get(str(cur["session_id"]), []) if str(r["session_id"]) not in seen]
         if not nxt:
             return cur
-        cur = max(nxt, key=lambda r: str(r.get("last_seen") or r.get("ended_at") or ""))
+        cur = max(nxt, key=lambda r: ({"live": 2, "parked": 1}.get(bus_state(r), 0), str(r.get("last_seen") or "")))
         seen.add(str(cur["session_id"]))
 
 
