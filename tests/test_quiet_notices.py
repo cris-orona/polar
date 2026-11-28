@@ -104,14 +104,14 @@ def test_mention_loud_when_on(tk, bot, monkeypatch):
     assert texts(bot)[0].startswith("🧭 Me etiquetaste") and tk.rows("task")[0]["thread_ts"] == "100.1"
 
 
-def test_confirm_card_still_posts_top_level(tk, bot, quiet, monkeypatch):
+def test_medium_routes_silently_when_quiet(tk, bot, quiet, monkeypatch):
     monkeypatch.setenv("POLAR_TRIAGE", "1")
     tid = tk.create_task(OWNER_DM, "", "web:abc", "algo", intake=True)
     tk.triage_set(tid, "S1", "tab 3", "medium", "parece lo mismo")
     tk.tick()
-    call = posts(bot)[-1]
-    assert call["text"].startswith("¿Es de tab 3") and "thread_ts" not in call
-    assert tk.get(tid)["status"] == "confirm" and tk.get(tid)["card_ts"]
+    assert not posts(bot)  # no question, and the quiet mode posts no status line
+    t = tk.get(tid)
+    assert t["status"] == "routed" and t["status_text"].startswith("➡️ Lo mandé a tab 3 (coincidencia probable)")
 
 
 def test_error_notice_still_posts(tk, bot, quiet):

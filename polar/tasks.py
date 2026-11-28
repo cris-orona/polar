@@ -1118,18 +1118,16 @@ class Tasks:
         for t in self.rows("task", "routefail"):
             self.update(t["id"], status="queued", queue_notified=0)
             self._card_done(t, "No pude entregarlo a %s; abro sesión nueva." % t["match_label"])
-        """Post the thread message for each answered triage: route at once (high) or ask (medium)."""
+        """Post the thread message for each answered triage. A match routes at once (high or medium); no question.
+        Rows already in `confirm` (older versions) still end through expire_triage, route_yes and route_new."""
         for t in self.rows("task", "matched"):
+            self.update(t["id"], status="routed", route_done=0)
             if t["match_conf"] == "high":
-                self.update(t["id"], status="routed", route_done=0)
                 text = "➡️ Lo mandé a %s: %s" % (t["match_label"], t["match_reason"])
-                self.status_line(t["id"], text, blocks.route_blocks(t))  # the «No, sesión nueva» button stays
-                ts = (self.get(t["id"]) or {}).get("status_ts")
             else:
-                self.update(t["id"], status="confirm")
-                ts = self.say(t["channel"], t["thread_ts"],
-                              "¿Es de %s? %s" % (t["match_label"], t["match_reason"]),
-                              blocks.confirm_blocks(t))
+                text = "➡️ Lo mandé a %s (coincidencia probable): %s" % (t["match_label"], t["match_reason"])
+            self.status_line(t["id"], text, blocks.route_blocks(t))  # the «No, sesión nueva» button stays
+            ts = (self.get(t["id"]) or {}).get("status_ts")
             if ts:
                 self.update(t["id"], card_ts=ts)
 

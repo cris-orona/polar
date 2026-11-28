@@ -212,7 +212,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--match", metavar="SESSION_ID")
     g.add_argument("--none", action="store_true", help="no session fits: open a new one")
     ts_.add_argument("--label", default="")
-    ts_.add_argument("--confidence", choices=["high", "medium"])
+    ts_.add_argument("--confidence", choices=["high", "medium"],
+                     help="high or medium: Polar routes at once, without asking the owner (medium says «coincidencia probable»)")
     ts_.add_argument("--reason", default="")
     ts_.add_argument("--where", choices=["laptop", "server"], default="server",
                      help="where a new session runs: server (default, at once) or laptop (with grace; browser or local Supabase)")

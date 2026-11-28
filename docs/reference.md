@@ -178,10 +178,10 @@ Polar only does not see DMs.
   it is the same rule as in `polar-notify` (a session id, or the release desk, which reads its own cards).
 - `→ 3 text` or `-> 3 text` steers laptop Herdr tab 3. The laptop relay delivers it (`polar steer-done <id>`).
 - Triage: a new task first has status `triage` (Polar does not launch it). The laptop router answers with
-  `polar triage-set`. `--none` or low confidence: `queued` (new session). High: status `routed`, the thread
-  says «➡️ Lo mandé a <label>: <reason>» with the button «No, sesión nueva». Medium: status `confirm`, a card
-  «¿Es de <label>?» with «Mandar a esa sesión» / «Sesión nueva»; no click in `POLAR_CONFIRM_TIMEOUT` (600 s)
-  means a new session. No answer in `POLAR_TRIAGE_TIMEOUT` (300 s) means a new session and the thread says
+  `polar triage-set`. `--none` or low confidence: `queued` (new session). High or medium: status `routed` at once, with no question to the owner. The thread
+  says «➡️ Lo mandé a <label>: <reason>» (medium: «… (coincidencia probable): <reason>») with the button
+  «No, sesión nueva». Old rows in status `confirm` still work: a card «¿Es de <label>?»; no click in
+  `POLAR_CONFIRM_TIMEOUT` (600 s) means a new session. No answer in `POLAR_TRIAGE_TIMEOUT` (300 s) means a new session and the thread says
   «Sin respuesta de la laptop; abro sesión nueva.». `POLAR_TRIAGE=0` turns triage off. Each pick item has its
   own task, thread and triage. The laptop delivers routed tasks (`polar routes`, then `polar route-done <id>`).
   After delivery the «No, sesión nueva» button does nothing.

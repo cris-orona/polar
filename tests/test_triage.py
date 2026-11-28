@@ -87,22 +87,33 @@ def test_no_button_after_delivery_does_nothing(tk):
     assert tk.get(tid)["status"] == "routed"
 
 
-def test_medium_asks_then_yes(tk, bot):
+def test_medium_routes_at_once(tk, bot):
     tid = new_task(tk)
     tk.triage_set(tid, "S1", "tab 3 · Acme", "medium", "parece lo mismo")
     tk.tick()
+    t = tk.get(tid)
+    assert t["status"] == "routed" and t["route_done"] == 0
+    assert not any("¿Es de" in x for x in texts(bot))
+    call = [c for c in bot.of("chat_postMessage") + bot.of("chat_update") if "coincidencia probable" in c["text"]][-1]
+    assert call["text"] == "➡️ Lo mandé a tab 3 · Acme (coincidencia probable): parece lo mismo"
+    assert "polar_route_new" in str(call["blocks"])
+
+
+def test_legacy_confirm_row_route_yes(tk, bot):
+    tid = new_task(tk)
+    tk.triage_set(tid, "S1", "tab 3 · Acme", "medium", "parece lo mismo")
+    tk.update(tid, status="confirm")  # a row from an older version
+    tk.tick()
     assert tk.get(tid)["status"] == "confirm"
-    call = bot.of("chat_postMessage")[-1]
-    ids = [e["action_id"] for e in call["blocks"][1]["elements"]]
-    assert ids == ["polar_route_yes", "polar_route_new"] and call["text"].startswith("¿Es de tab 3")
     assert tk.route_yes(tid)
     assert tk.get(tid)["status"] == "routed"
     assert bot.of("chat_update")
 
 
-def test_medium_new_session(tk):
+def test_legacy_confirm_row_new_session(tk):
     tid = new_task(tk)
     tk.triage_set(tid, "S1", "tab 3", "medium", "r")
+    tk.update(tid, status="confirm")
     tk.tick()
     assert tk.route_new(tid) and tk.get(tid)["status"] == "queued"
 
@@ -121,6 +132,7 @@ def test_triage_timeout_default_and_notice(tk, bot, conn):
 def test_confirm_timeout(tk, bot, conn):
     tid = new_task(tk)
     tk.triage_set(tid, "S1", "tab 3", "medium", "r")
+    tk.update(tid, status="confirm")
     tk.tick()
     conn.execute("UPDATE tasks SET updated_at='2020-01-01T00:00:00Z' WHERE id=?", (tid,))
     tk.expire_triage()
@@ -175,6 +187,7 @@ def test_buttons_work_for_owner_only(polar, bot):
     polar.tasks.on_message(msg("tarea"))
     tid = polar.tasks.rows("task")[0]["id"]
     polar.tasks.triage_set(tid, "S1", "tab 1", "medium", "r")
+    polar.tasks.update(tid, status="confirm")
     polar.tasks.tick()
     polar.on_route_yes("U9", tid)
     assert polar.tasks.get(tid)["status"] == "confirm"
