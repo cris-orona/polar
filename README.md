@@ -117,7 +117,7 @@ reminders and report cards link to it.
 
 ## Screenshots
 
-![Pending page: two decisions, a questions card, a reply and an email wait for an answer](docs/img/pending.png)
+![Pending page: two decision cards and a questions card wait for an answer](docs/img/pending.png)
 
 ![A full report with a table, a chart and next-step buttons](docs/img/report.png)
 
