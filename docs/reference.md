@@ -94,6 +94,40 @@ Answer: 200 `{"ok":true,"status":"<status after>"}`. Refused: 400 (bad input) or
 unknown id) with `{"ok":false,"error":"<texto>"}`; 409 also has `status`. A repeat on a decided card gives 409
 and changes nothing. If the post to Slack or Gmail fails: 502 with `"status":"failed"` (the card shows «Falló»).
 
+## Web UI
+
+`polar/web/` is a server-rendered web UI (standard library HTTP server, Markdown for card bodies). `polar serve`
+starts it in a daemon thread when `POLAR_UI_PORT` is set; unset or `0` keeps it off, and a busy port only logs one
+line. It binds `127.0.0.1`. The log line gives the URL and `POLAR_WEB_URL`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `POLAR_UI_PORT` | none | Port of the UI. Unset or `0`: off. |
+| `POLAR_UI_HOSTS` | none | Comma list of extra `Host` values (a reverse proxy host name). Origins `http://` and `https://` of each are allowed. |
+| `POLAR_UI_OWNER` | none | When set, the owner header must equal it, else 403. |
+| `POLAR_UI_OWNER_HEADER` | `Tailscale-User-Login` | Header that carries the owner login. |
+| `POLAR_UI_LANG` | `en` | `en` or `es`. All UI strings are in `polar/web/strings.py`. |
+| `POLAR_TZ` | system zone | Time zone of the dates on the pages. |
+| `POLAR_WEB_URL` | none | The URL you open the UI at. Reminders and report cards link to `<POLAR_WEB_URL>/?c=<id>` and `/informes/<id>`. |
+| `POLAR_WEB_ALLOW` | none | `send` shows and allows Send on reply and email cards. |
+
+Routes:
+
+| Route | What |
+| --- | --- |
+| `GET /` | Pending: open action cards (oldest first), then reports not seen. `?c=<id>` puts that card first; a closed card shows read-only. |
+| `GET /history` | Decided cards by day, newest first, `?page=N`. Reports that were filed, replaced or expired are left out. |
+| `GET /reports`, `/informes` | All reports, newest first, `?q=` searches title, context and text, `?page=N`. |
+| `GET /reports/<id>`, `/informes/<id>` | One full report. |
+| `GET /files/<id>/<n>` | File `n` of the card, only inside `data/files` or `data/uploads`. |
+| `GET /api/state` | `{"v": <version stamp>, "waiting": n}`. The page polls it every 5 s. |
+| `GET /healthz` | `{"ok": true}`. |
+| `POST /api/act` | `{"id", "action", ...}` with `X-CSRF-Token`. Runs `webapi.perform` in process. `seen` maps to `choose` `ok` on a report. |
+
+`polar demo [--port 8792] [--lang en|es]` starts only the UI on a fresh temporary data dir with invented cards. It
+ignores `POLAR_DATA_DIR`, needs no token, and uses the real core with a fake Slack client, so actions change only
+the temporary database. The folder is removed on exit.
+
 ## Tasks (send an agent from Polar)
 
 The owner writes to Polar in the DM. Polar needs the `message.im` event, the `im:history` bot scope
