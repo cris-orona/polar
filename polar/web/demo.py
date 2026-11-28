@@ -304,7 +304,8 @@ def run(port: int = 8792, lang: Optional[str] = None) -> int:
         except OSError as exc:
             print("polar demo: port %d is not free (%s)" % (port, exc.strerror or type(exc).__name__))
             return 1
-        print("Polar demo: %s  (sample data in a temporary folder; Ctrl-C stops it)" % ui.url, flush=True)
+        print("Polar demo: open %s\n(sample data in a temporary folder; the link logs you in; Ctrl-C stops it)"
+              % ui.login_url, flush=True)
         try:
             ui.serve_forever()
         except KeyboardInterrupt:

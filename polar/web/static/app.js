@@ -97,13 +97,14 @@
       body: JSON.stringify(payload(card, btn))
     }).then(function (res) {
       return res.json().catch(function () { return { ok: false }; }).then(function (data) {
-        return { ok: res.ok && data.ok, data: data };
+        return { ok: res.ok && data.ok, data: data, status: res.status };
       });
     }).then(function (r) {
       busy -= 1;
       if (r.ok) { afterDone(card, r.data); return; }
       if (r.data && r.data.v) document.body.setAttribute("data-v", r.data.v);
       setBusy(card, false);
+      if (r.status === 401) { dirty = true; showMsg(card, S.js_err_login); return; } /* keep the typed text */
       showMsg(card, (r.data && r.data.error) || S.js_err_net);
     }).catch(function () {
       busy -= 1;
@@ -236,6 +237,7 @@
 
   function poll() {
     fetch("/api/state", { credentials: "same-origin", cache: "no-store" }).then(function (res) {
+      if (res.status === 401 && quiet()) { window.location.reload(); return null; } /* shows the login page */
       return res.ok ? res.json() : null;
     }).then(function (data) {
       if (!data) return;

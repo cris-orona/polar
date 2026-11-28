@@ -1,6 +1,8 @@
 """The web UI: request checks, pages, actions through webapi.perform, files and the demo seed."""
 import http.client
 import json
+import logging
+import os
 import re
 import socket
 import threading
@@ -36,9 +38,17 @@ def ui(data, polar):
     srv.server_close()
 
 
-def call(srv, method, path, body=None, headers=None, host=None):
+def session_cookie(srv):
+    """The Cookie header of a logged-in browser (what GET /login sets)."""
+    return "%s=%s" % (server.COOKIE, srv.session)
+
+
+def call(srv, method, path, body=None, headers=None, host=None, login=True):
+    """One request. `login=True` sends the session cookie, as a browser that opened the login link."""
     c = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=5)
     h = {"Host": host or "127.0.0.1:%d" % srv.port}
+    if login:
+        h["Cookie"] = session_cookie(srv)
     h.update(headers or {})
     data = json.dumps(body).encode() if isinstance(body, (dict, list)) else body
     c.request(method, path, body=data, headers=h)
@@ -117,10 +127,113 @@ def test_post_needs_origin_and_csrf(ui, conn, decision_id):
     assert post(ui, body)[0] == 200
 
 
-def test_csrf_secret_file_is_private(ui, data):
-    f = data / server.SECRET_FILE
+def test_ui_reuses_the_web_api_secret(ui, data):
+    f = data / "web-token"
     assert f.exists() and (f.stat().st_mode & 0o777) == 0o600
+    assert not (data / "web-ui-secret").exists()  # one secret file for the API and the UI
+    secret = f.read_text().strip()
+    assert ui.login == server.login_token(secret) and ui.session == server.session_value(secret)
     assert ui.csrf() in call(ui, "GET", "/")[1].decode()
+
+
+# -- login ---------------------------------------------------------------------------------------------------------------
+def test_no_session_gets_401_everywhere(ui, conn, decision_id, data):
+    show(conn, decision_id)
+    f = data / "files" / "chart.png"
+    f.write_bytes(demo.chart_png(8, 8))
+    rid = report(conn, files=[str(f)])
+    for path in ("/", "/history", "/reports", "/reports/" + rid, "/?c=" + decision_id, "/files/%s/0" % rid, "/nope"):
+        code, raw, h = call(ui, "GET", path, login=False)
+        page = raw.decode()
+        assert code == 401 and h["Content-Type"].startswith("text/html"), path
+        assert "polar ui-url" in page and strings.t("login_need") in page
+        assert ui.csrf() not in page and "csrf" not in page and "Release" not in page and decision_id not in page
+        assert "PNG" not in page and h["Connection"] == "close"
+    code, raw, h = call(ui, "GET", "/api/state", login=False)
+    assert code == 401 and json.loads(raw) == {"ok": False, "error": strings.t("err_login")}
+    body = {"id": decision_id, "action": "choose", "option": "go"}
+    code, out = post(ui, body, headers={"Cookie": ""})
+    assert code == 401 and out["error"] == strings.t("err_login")
+    code, out = post(ui, body, headers={"Cookie": "%s=%s" % (server.COOKIE, "0" * 64)})
+    assert code == 401 and db.get(conn, decision_id)["status"] == "shown"
+    assert call(ui, "GET", "/", headers={"Cookie": "%s=wrong" % server.COOKIE}, login=False)[0] == 401
+    assert call(ui, "GET", "/healthz", login=False)[0] == 200
+    assert call(ui, "GET", "/static/app.css", login=False)[0] == 200
+
+
+def test_401_page_follows_the_language(ui, monkeypatch):
+    monkeypatch.setenv("POLAR_UI_LANG", "es")
+    raw = call(ui, "GET", "/", login=False)[1].decode()
+    assert '<html lang="es">' in raw and strings.t("login_need") in raw and "Abre tu enlace" in raw
+
+
+def test_login_link(ui):
+    for q in ("", "?token=", "?token=" + "0" * 64, "?token=" + ui.session):
+        code, raw, h = call(ui, "GET", "/login" + q, login=False)
+        assert code == 403 and "Set-Cookie" not in h and h["Connection"] == "close"
+        assert strings.t("login_bad") in raw.decode() and ui.login not in raw.decode()
+    assert call(ui, "GET", "/login?token=" + ui.login, login=False, host="evil.example")[0] == 403
+    code, _, h = call(ui, "GET", "/login?token=" + ui.login, login=False)
+    assert code == 303 and h["Location"] == "/"
+    cookie = h["Set-Cookie"]
+    assert cookie.startswith("%s=%s;" % (server.COOKIE, ui.session))
+    for part in ("HttpOnly", "SameSite=Strict", "Path=/", "Max-Age=%d" % server.COOKIE_MAX_AGE):
+        assert part in cookie
+    assert 150 * 86400 < server.COOKIE_MAX_AGE < 200 * 86400
+    jar = cookie.split(";")[0]
+    code, raw, _ = call(ui, "GET", "/", headers={"Cookie": "other=1; " + jar}, login=False)
+    assert code == 200 and ui.csrf() in raw.decode()
+
+
+def test_login_url_matches_the_server(ui, data):
+    assert ui.login_url == server.login_url(ui.port, data) == "http://127.0.0.1:%d/login?token=%s" % (ui.port, ui.login)
+
+
+def test_csrf_and_session_do_not_cross_secrets(data, polar, tmp_path, conn, decision_id):
+    show(conn, decision_id)
+    other = tmp_path / "other"
+    other.mkdir()
+    a = server.UIServer(0, polar, data_dir=data)
+    b = server.UIServer(0, polar, data_dir=other)
+    for s_ in (a, b):
+        threading.Thread(target=s_.serve_forever, daemon=True).start()
+    try:
+        assert a.secret != b.secret and a.csrf() != b.csrf() and a.session != b.session and a.login != b.login
+        body = {"id": decision_id, "action": "choose", "option": "go"}
+        assert post(b, body, headers={"X-CSRF-Token": a.csrf()})[0] == 403  # CSRF token of another secret
+        assert post(b, body, headers={"Cookie": session_cookie(a)})[0] == 401  # session of another secret
+        assert call(b, "GET", "/login?token=" + a.login, login=False)[0] == 403
+        assert db.get(conn, decision_id)["status"] == "shown"
+        assert post(b, body)[0] == 200
+    finally:
+        for s_ in (a, b):
+            s_.shutdown()
+            s_.server_close()
+
+
+def test_ui_url_command(data, monkeypatch, capsys):
+    from polar import cli
+    assert cli.main(["ui-url"]) == 2 and "POLAR_UI_PORT" in capsys.readouterr().out
+    monkeypatch.setenv("POLAR_UI_PORT", "8795")
+    assert cli.main(["ui-url"]) == 0
+    out = capsys.readouterr().out.strip()
+    secret = (data / "web-token").read_text().strip()
+    assert out == "http://127.0.0.1:8795/login?token=" + server.login_token(secret)
+
+
+def test_demo_prints_the_login_link(tmp_path, monkeypatch, capsys):
+    for k in ["POLAR_DATA_DIR"] + list(demo.DEMO_ENV):
+        monkeypatch.setenv(k, os.environ.get(k, ""))
+    seen = {}
+
+    def stop(self):
+        seen["url"] = self.login_url
+        seen["secret"] = (self.data_dir / "web-token").exists()
+        raise KeyboardInterrupt
+    monkeypatch.setattr(server.UIServer, "serve_forever", stop)
+    assert demo.run(port=0) == 0
+    out = capsys.readouterr().out
+    assert seen["secret"] and seen["url"] in out and "/login?token=" in out
 
 
 def raw(port, data, timeout=2.0):
@@ -141,15 +254,17 @@ def raw(port, data, timeout=2.0):
     return out, closed
 
 
-@pytest.mark.parametrize("why", ["host", "origin", "csrf", "path"])
+@pytest.mark.parametrize("why", ["host", "origin", "csrf", "path", "login"])
 def test_rejected_post_closes_the_connection(ui, why):
     inner = b"GET / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n" % ui.port
     host = b"evil.example" if why == "host" else b"127.0.0.1:%d" % ui.port
     origin = b"http://evil.example" if why == "origin" else b"http://127.0.0.1:%d" % ui.port
     csrf = b"" if why == "csrf" else ui.csrf().encode()
     path = b"/nope" if why == "path" else b"/api/act"
-    req = (b"POST %s HTTP/1.1\r\nHost: %s\r\nOrigin: %s\r\nX-CSRF-Token: %s\r\nContent-Type: application/json\r\n"
-           b"Content-Length: %d\r\n\r\n" % (path, host, origin, csrf, len(inner))) + inner
+    cookie = b"" if why == "login" else session_cookie(ui).encode()
+    req = (b"POST %s HTTP/1.1\r\nHost: %s\r\nOrigin: %s\r\nX-CSRF-Token: %s\r\nCookie: %s\r\n"
+           b"Content-Type: application/json\r\nContent-Length: %d\r\n\r\n"
+           % (path, host, origin, csrf, cookie, len(inner))) + inner
     out, closed = raw(ui.port, req)
     assert out.count(b"HTTP/1.1 ") == 1, out[:400]
     assert closed and b"Connection: close" in out and b"<article" not in out
@@ -467,17 +582,19 @@ def test_ui_off_without_port(polar, monkeypatch):
     assert server.start(polar) is None
 
 
-def test_ui_starts_with_port(polar, data, monkeypatch):
+def test_ui_starts_with_port(polar, data, monkeypatch, caplog):
     import socket
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()
     monkeypatch.setenv("POLAR_UI_PORT", str(port))
+    caplog.set_level(logging.INFO, logger="polar")
     srv = server.start(polar)
     try:
         assert srv is not None and srv.server_address[0] == "127.0.0.1" and srv.port == port
         assert call(srv, "GET", "/healthz")[0] == 200
+        assert "polar ui-url" in caplog.text and srv.login not in caplog.text and srv.session not in caplog.text
     finally:
         srv.shutdown()
         srv.server_close()
