@@ -38,6 +38,7 @@ EN: Dict[str, str] = {
     "next_steps": "Next steps", "next_start": "Start selected", "seen": "Seen", "resume": "Resume the session",
     "full_report": "Full report", "back_reports": "All reports",
     "closed_note": "This card is closed. It shows what was decided.",
+    "not_delivered": "Not delivered yet. You can answer it when it arrives.",
     "empty": "Nothing waits for you.",
     # history and reports
     "history_empty": "No decisions yet.", "newer": "Newer", "older": "Older", "pages": "Pages",
@@ -88,6 +89,7 @@ ES: Dict[str, str] = {
     "next_steps": "Siguientes pasos", "next_start": "Empezar marcados", "seen": "Visto",
     "resume": "Retomar la sesión", "full_report": "Informe completo", "back_reports": "Todos los informes",
     "closed_note": "Esta tarjeta está cerrada. Muestra lo que se decidió.",
+    "not_delivered": "Aún no se entrega. Podrás responderla cuando llegue.",
     "empty": "No hay nada pendiente.",
     "history_empty": "Aún no hay decisiones.", "newer": "Más recientes", "older": "Más antiguas",
     "pages": "Páginas", "search": "Buscar", "search_hint": "Buscar en los informes",

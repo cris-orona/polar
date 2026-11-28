@@ -318,6 +318,7 @@ def test_each_kind_renders_its_actions(conn, monkeypatch):
     monkeypatch.delenv("POLAR_UI_LANG", raising=False)
     rid = db.create_request(conn, "decision", "Pick", "c", "s", options=[
         {"key": "a", "label": "Alpha (recommended)"}, {"key": "b", "label": "Beta"}])
+    show(conn, rid)  # delivered: a pending card has no buttons (see test_pending_card_is_read_only)
     h = views.card_html(db.get(conn, rid), True)
     assert 'data-option="a"' in h and 'data-option="b"' in h and 'class="rec"' in h and 'data-toggle="revise"' in h
     assert "(recommended)" not in h  # the mark replaces the label text
@@ -325,10 +326,12 @@ def test_each_kind_renders_its_actions(conn, monkeypatch):
         {"key": "one", "text": "First?", "recommended": "y", "options": [{"key": "y", "label": "Yes"},
                                                                          {"key": "n", "label": "No"}]},
         {"key": "two", "text": "Free?", "options": []}])
+    show(conn, qid)
     h = views.card_html(db.get(conn, qid), True)
     assert 'type="radio"' in h and 'value="y" checked' in h and 'data-action="answer"' in h and 'name="note"' in h
     eid = db.create_request(conn, "email", "Mail", "c", "s", draft_text="Hello", target_thread_ts="th1")
     db.set_original(conn, eid, orig_name="Kim", orig_text="Original words", email_subject="Hi there")
+    show(conn, eid)
     h = views.card_html(db.get(conn, eid), True)
     assert 'data-action="send"' in h and 'data-action="discard"' in h and "Original words" in h and "Hi there" in h
     h = views.card_html(db.get(conn, eid), False)
@@ -810,3 +813,25 @@ def test_href_text_is_not_rewritten():
     assert 'href="javascript:alert(1)"' in out and 'href="/x"' in out and "target=" not in out and "<a" not in out
     link = views.md('[site](https://example.com) then href="https://example.com" as words')
     assert link.count('target="_blank"') == 1 and link.count("<a ") == 1
+
+
+# -- cards not delivered yet ---------------------------------------------------------------------------------------------
+def test_pending_card_is_read_only(ui, conn, decision_id, reply_id):
+    page = call(ui, "GET", "/")[1].decode()
+    for rid in (decision_id, reply_id):
+        assert db.get(conn, rid)["status"] == "pending"
+        start = page.index('id="c-%s"' % rid)
+        card = page[start:page.index("</article>", start)]
+        assert strings.t("not_delivered") in card and "data-action" not in card and "<textarea" not in card
+    assert strings.t("not_delivered").startswith("Not delivered yet")
+    strings.set_lang("es")
+    try:
+        assert strings.t("not_delivered").startswith("Aún no se entrega")
+    finally:
+        strings.set_lang(None)
+    assert post(ui, {"id": decision_id, "action": "choose", "option": "a"})[0] in (400, 409)
+    assert db.get(conn, decision_id)["status"] == "pending"
+    show(conn, decision_id)
+    page = call(ui, "GET", "/")[1].decode()
+    start = page.index('id="c-%s"' % decision_id)
+    assert "data-action" in page[start:page.index("</article>", start)]
