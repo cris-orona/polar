@@ -509,5 +509,16 @@ def report_page(card: Dict[str, Any], allow_send: bool) -> str:
             % (esc(t("back_reports")), card_html(card, allow_send, on_page=True)))
 
 
+def login_page(text: str, cmd: str) -> str:
+    """The page for a request without a session (401) or with a bad login link (403). No card data, no CSRF token."""
+    return ('<!doctype html><html lang="%s"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark">'
+            '<link rel="icon" href="data:,"><title>%s · Polar</title><link rel="stylesheet" href="%s"></head>'
+            '<body><header class="top"><span class="brand">Polar</span></header><main id="main"><h1>%s</h1>'
+            '<p>%s</p><p>%s</p></main></body></html>'
+            % (esc(lang()), esc(t("login_title")), _asset("app.css"), esc(t("login_title")), esc(text),
+               t("login_how", cmd="<code>%s</code>" % esc(cmd))))
+
+
 def message_page(text: str) -> str:
     return '<h1>%s</h1><p><a href="/">%s</a></p>' % (esc(text), esc(t("nav_pending")))

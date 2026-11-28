@@ -256,6 +256,7 @@ def build_parser() -> argparse.ArgumentParser:
     demo = sub.add_parser("demo", help="the web UI on sample data: no Slack, nothing is sent")
     demo.add_argument("--port", type=int, default=8792)
     demo.add_argument("--lang", choices=["en", "es"], default=None)
+    sub.add_parser("ui-url", help="print the login link of the web UI (POLAR_UI_PORT); it is a credential")
     sub.add_parser("doctor")
     return p
 
@@ -804,6 +805,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.cmd == "demo":
             from polar.web import demo as web_demo
             return web_demo.run(args.port, args.lang)
+        if args.cmd == "ui-url":
+            from polar.web import server as web_ui
+            port = web_ui.ui_port()
+            if not port:
+                _out({"error": "POLAR_UI_PORT is not set: the web UI is off"})
+                return 2
+            print(web_ui.login_url(port))
+            return 0
         if args.cmd == "serve":
             from polar.app import serve
             return serve()

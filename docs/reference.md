@@ -98,7 +98,16 @@ and changes nothing. If the post to Slack or Gmail fails: 502 with `"status":"fa
 
 `polar/web/` is a server-rendered web UI (standard library HTTP server, Markdown for card bodies). `polar serve`
 starts it in a daemon thread when `POLAR_UI_PORT` is set; unset or `0` keeps it off, and a busy port only logs one
-line. It binds `127.0.0.1`. The log line gives the URL and `POLAR_WEB_URL`.
+line. It binds `127.0.0.1`. The log line gives the URL, the command that prints the login link and
+`POLAR_WEB_URL`; it never holds the token.
+
+Login: `polar ui-url` prints `http://127.0.0.1:<POLAR_UI_PORT>/login?token=<token>` (exit 2 when `POLAR_UI_PORT` is
+not set). Open it once: it sets the cookie `polar_ui` (`HttpOnly; SameSite=Strict; Path=/; Max-Age` 180 days).
+The token is `HMAC-SHA256(secret, "polar-ui-login")`, the cookie value `HMAC-SHA256(secret, "polar-ui-session")` and
+the CSRF token an HMAC of the secret and the cookie value; the secret is the web API token in `data/web-token`. Without
+the cookie, every route except `/login`, `/healthz` and `/static/` answers 401 (a short HTML page for pages and
+files, JSON for `/api/` and POST). The login keeps out other OS users, web pages and scripts that only find the port;
+a program that runs as your own OS user can read the secret and the database, so it can act as you.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -115,6 +124,7 @@ Routes:
 
 | Route | What |
 | --- | --- |
+| `GET /login?token=` | Right token: sets the session cookie, 303 to `/`. Else 403. |
 | `GET /` | Pending: open action cards (oldest first), then reports not seen. `?c=<id>` puts that card first; a closed card shows read-only. |
 | `GET /history` | Decided cards by day, newest first, `?page=N`. Reports that were filed, replaced or expired are left out. |
 | `GET /reports`, `/informes` | All reports, newest first, `?q=` searches title, context and text, `?page=N`. |
@@ -125,7 +135,7 @@ Routes:
 | `POST /api/act` | `{"id", "action", ...}` with `X-CSRF-Token`. Runs `webapi.perform` in process. `seen` maps to `choose` `ok` on a report. |
 
 `polar demo [--port 8792] [--lang en|es]` starts only the UI on a fresh temporary data dir with invented cards. It
-ignores `POLAR_DATA_DIR`, needs no token, and uses the real core with a fake Slack client, so actions change only
+ignores `POLAR_DATA_DIR`, makes its own secret in that folder, prints its login link at start, and uses the real core with a fake Slack client, so actions change only
 the temporary database. The folder is removed on exit.
 
 ## Tasks (send an agent from Polar)

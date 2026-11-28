@@ -12,6 +12,7 @@ import mimetypes
 import os
 import threading
 from http import HTTPStatus
+from http.cookies import CookieError, SimpleCookie
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -29,7 +30,34 @@ FILE_CSP = "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame
 INLINE_OK = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain"}
 STATIC_FILES = {"app.css": "text/css; charset=utf-8", "app.js": "text/javascript; charset=utf-8"}
 ACTIONS = ("choose", "answer", "send", "discard", "revise", "next", "seen")
-SECRET_FILE = "web-ui-secret"
+COOKIE = "polar_ui"
+COOKIE_MAX_AGE = 180 * 24 * 3600  # seconds: about six months
+PUBLIC = ("/healthz", "/login")  # with /static/: the only paths that need no session cookie
+LOGIN_CMD = "polar ui-url"
+
+
+def _mac(secret: str, label: str) -> str:
+    return hmac.new(secret.encode("utf-8"), label.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def login_token(secret: str) -> str:
+    """The token of the login link. It comes from the web API secret (data/web-token, mode 0600)."""
+    return _mac(secret, "polar-ui-login")
+
+
+def session_value(secret: str) -> str:
+    """The value of the session cookie that /login sets."""
+    return _mac(secret, "polar-ui-session")
+
+
+def secret_path(data_dir: Optional[Path] = None) -> Path:
+    """The same secret file as the local web API: one secret for both."""
+    return Path(data_dir) / "web-token" if data_dir else webapi.token_path()
+
+
+def login_url(port: int, data_dir: Optional[Path] = None) -> str:
+    """The login link: open it once in the browser, it sets the session cookie. It is a credential: never log it."""
+    return "http://127.0.0.1:%d/login?token=%s" % (port, login_token(webapi.load_token(secret_path(data_dir))))
 
 
 def ui_port() -> Optional[int]:
@@ -115,7 +143,8 @@ class UIServer(ThreadingHTTPServer):
         self.polar, self.demo = polar, demo
         self.data_dir = Path(data_dir) if data_dir else db.data_dir()
         self.port = self.server_address[1]
-        self.secret = webapi.load_token(self.data_dir / SECRET_FILE)
+        self.secret = webapi.load_token(secret_path(self.data_dir))
+        self.login, self.session = login_token(self.secret), session_value(self.secret)
         extra = [h.strip().lower() for h in (os.environ.get("POLAR_UI_HOSTS") or "").split(",") if h.strip()]
         self.hosts = ["127.0.0.1:%d" % self.port, "localhost:%d" % self.port] + extra
         self.origins = {s + h for h in self.hosts for s in ("http://", "https://")}
@@ -124,7 +153,8 @@ class UIServer(ThreadingHTTPServer):
         self.roots = [os.path.realpath(str(self.data_dir / "files")), os.path.realpath(str(self.data_dir / "uploads"))]
 
     def csrf(self) -> str:
-        return hmac.new(self.secret.encode(), b"polar-ui-csrf:" + self.owner.encode(), hashlib.sha256).hexdigest()
+        """The CSRF token, bound to the session value: another secret or another session gives another token."""
+        return _mac(self.secret, "polar-ui-csrf:%s:%s" % (self.session, self.owner))
 
     def allow_send(self) -> bool:
         return "send" in webapi.allowed()
@@ -132,6 +162,10 @@ class UIServer(ThreadingHTTPServer):
     @property
     def url(self) -> str:
         return "http://127.0.0.1:%d/" % self.port
+
+    @property
+    def login_url(self) -> str:
+        return "http://127.0.0.1:%d/login?token=%s" % (self.port, self.login)
 
 
 class Handler(webapi.CloseOnError):
@@ -202,6 +236,27 @@ class Handler(webapi.CloseOnError):
                 return False
         return True
 
+    def _has_session(self) -> bool:
+        """True when the request carries the session cookie that /login sets."""
+        try:
+            jar = SimpleCookie(self.headers.get("Cookie") or "")
+        except CookieError:
+            return False
+        got = jar[COOKIE].value if COOKIE in jar else ""
+        return bool(got) and hmac.compare_digest(got.encode("utf-8"), self.server.session.encode("utf-8"))
+
+    def _need_login(self, path: str) -> None:
+        """401 without a session: JSON for the API, else a short page that says how to log in (no card data)."""
+        if path.startswith("/api/") or self.command == "POST":
+            return self._json(401, {"ok": False, "error": t("err_login")})
+        self._send(401, views.login_page(t("login_need"), LOGIN_CMD))
+
+    def _login(self, token: str) -> None:
+        if not token or not hmac.compare_digest(token.encode("utf-8"), self.server.login.encode("utf-8")):
+            return self._send(403, views.login_page(t("login_bad"), LOGIN_CMD))
+        cookie = "%s=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=%d" % (COOKIE, self.server.session, COOKIE_MAX_AGE)
+        self._send(303, "", "text/plain; charset=utf-8", {"Location": "/", "Set-Cookie": cookie})
+
     # -- verbs ---------------------------------------------------------------------------------------------------------
     def do_HEAD(self) -> None:
         self.do_GET()
@@ -211,6 +266,9 @@ class Handler(webapi.CloseOnError):
             self.close_connection = True  # a GET body is never read: do not parse it as the next request
         if not self._guard():
             return
+        path = urlparse(self.path).path
+        if path not in PUBLIC and not path.startswith("/static/") and not self._has_session():
+            return self._need_login(path)
         try:
             self._route_get()
         except (BrokenPipeError, ConnectionResetError):
@@ -232,6 +290,8 @@ class Handler(webapi.CloseOnError):
                 return max(0, min(int(arg("page") or 0), 10000))
             except ValueError:
                 return 0
+        if path == "/login":
+            return self._login(arg("token"))
         if path == "/":
             cid = arg("c")
             focus = db.get(conn, cid) if cid and len(cid) <= 40 else None
@@ -298,6 +358,8 @@ class Handler(webapi.CloseOnError):
     def do_POST(self) -> None:
         if not self._guard():
             return
+        if not self._has_session():
+            return self._need_login(urlparse(self.path).path)
         if urlparse(self.path).path != "/api/act":
             return self._json(404, {"ok": False, "error": t("not_found")})
         if self.headers.get("Transfer-Encoding"):  # only a plain Content-Length body is read
@@ -344,5 +406,6 @@ def start(polar: Any, port: Optional[int] = None) -> Optional[UIServer]:
         log.warning("web UI off: port %s (%s)", port, type(exc).__name__)
         return None
     threading.Thread(target=server.serve_forever, daemon=True, name="polar-ui").start()
-    log.info("web UI on %s (POLAR_WEB_URL: %s)", server.url, os.environ.get("POLAR_WEB_URL") or "not set")
+    log.info("web UI on %s; run `%s` to print the login link (POLAR_WEB_URL: %s)", server.url, LOGIN_CMD,
+             os.environ.get("POLAR_WEB_URL") or "not set")
     return server

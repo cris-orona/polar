@@ -15,9 +15,12 @@ See the web UI on sample cards in one minute. No Slack app, no token and no conf
 
 ```sh
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-bin/polar demo                 # then open http://127.0.0.1:8792/
+bin/polar demo                 # then open the login link it prints
 bin/polar demo --lang es --port 8793
 ```
+
+At start the demo prints a link such as `http://127.0.0.1:8792/login?token=...`. Open it: it logs you in to this
+demo only (the demo has its own secret).
 
 The demo makes a new temporary folder each time, seeds it with invented cards and starts only the web UI.
 The buttons work on that temporary database. Nothing goes to Slack or Gmail. Ctrl-C stops it and removes the folder.
@@ -90,6 +93,12 @@ Polar also has these optional features. They are all in the code today. Read `do
   Pictures open in a photo viewer. `/?c=<id>` puts one card first.
 - **History**: the decided cards, grouped by day, newest first.
 - **Reports**: every report, with a search box. `/reports/<id>` (or `/informes/<id>`) is one full report.
+
+To log in, run `polar ui-url` on the machine that runs Polar and open the link it prints
+(`http://127.0.0.1:<POLAR_UI_PORT>/login?token=...`) once in your browser. The link sets a session cookie for about
+six months; without it every page answers 401. The link is a credential: do not share it or paste it in a chat. The
+token comes from the same secret file as the web API (`data/web-token`, mode 0600), so a new secret file logs out
+every browser.
 
 Each button runs the same core method as the Slack button, in the same process, so the Slack card updates too.
 Send stays off until you set `POLAR_WEB_ALLOW=send`. The page refreshes itself when a card changes, but not while you type.
@@ -195,10 +204,15 @@ More variables (timeouts, triage, Gmail) are in `docs/reference.md` and the sour
 - Token files must be 0600 in a 0700 folder.
 - The web API binds to 127.0.0.1, needs a bearer token (`data/web-token`, mode 0600), checks the `Host` header and limits the body size.
   Sending to other people and production steps from the web are off unless you set `POLAR_WEB_ALLOW`.
-- The web UI binds to 127.0.0.1 and accepts only its own `Host` values (plus `POLAR_UI_HOSTS`). With `POLAR_UI_OWNER`
-  set, it also needs the owner header from your proxy. Each POST needs a same-site `Origin` and a CSRF token (an
-  HMAC from a per-install secret, `data/web-ui-secret`, mode 0600). Pages send a strict Content Security Policy with
-  no inline script, and every value is escaped. The UI serves files only from `data/files` and `data/uploads`.
+- The web UI binds to 127.0.0.1 and accepts only its own `Host` values (plus `POLAR_UI_HOSTS`). Every page, file
+  and action needs the session cookie that the login link (`polar ui-url`) sets. With `POLAR_UI_OWNER` set, it also
+  needs the owner header from your proxy. Each POST needs a same-site `Origin` and a CSRF token bound to the session.
+  The login token, the cookie and the CSRF token are HMACs of the web API secret (`data/web-token`, mode 0600).
+  Pages send a strict Content Security Policy with no inline script, and every value is escaped. The UI serves files
+  only from `data/files` and `data/uploads`.
+- The login keeps out other users of the machine, web pages in your browser and scripts that only find the port.
+  It cannot keep out a program that runs as your own OS user: that program can read the secret file and the database,
+  so it can act as you. Polar cannot defend against that.
 - A stale click on a card that is already decided does nothing.
 - Polar never starts a session with `--dangerously-skip-permissions`.
 

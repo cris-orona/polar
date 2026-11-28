@@ -49,7 +49,9 @@ EN: Dict[str, str] = {
     "err_too_big": "The request is too large.", "err_json": "The request is not valid JSON.",
     "err_gate": "This action is off on the web.", "err_changed": "This card changed already ({status}).",
     "err_send": "It could not be sent. Check the card.", "err_bad": "The request is not valid.",
-    "err_internal": "Internal error.",
+    "err_internal": "Internal error.", "err_login": "You are not logged in. Reload the page.",
+    "login_title": "Log in", "login_need": "Open your login link to use Polar here.",
+    "login_bad": "This login link is not valid.", "login_how": "Run {cmd} on this computer to print the link.",
     "v_id": "The card id is missing.", "v_action": "Unknown action.", "v_option": "Choose an option.",
     "v_answers": "Answer the questions first.", "v_text": "The text is empty.",
     "v_revise": "Write what should change.", "v_next": "Select 1 to 3 different next steps.",
@@ -57,6 +59,7 @@ EN: Dict[str, str] = {
     # page script (static/app.js)
     "js_err_net": "No connection. Try again.", "js_viewer": "Photo viewer", "js_close": "Close",
     "js_prev": "Previous", "js_next": "Next", "js_open_tab": "Open in a new tab", "js_count": "{i} of {n}",
+    "js_err_login": "You are logged out. Open your login link again (run polar ui-url), then reload.",
 }
 
 ES: Dict[str, str] = {
@@ -94,13 +97,17 @@ ES: Dict[str, str] = {
     "err_too_big": "La petición es demasiado grande.", "err_json": "La petición no es JSON válido.",
     "err_gate": "Esta acción está apagada en la web.", "err_changed": "Esta tarjeta ya cambió ({status}).",
     "err_send": "No se pudo enviar. Revisa la tarjeta.", "err_bad": "La petición no es válida.",
-    "err_internal": "Error interno.",
+    "err_internal": "Error interno.", "err_login": "No has iniciado sesión. Recarga la página.",
+    "login_title": "Iniciar sesión", "login_need": "Abre tu enlace de acceso para usar Polar aquí.",
+    "login_bad": "Este enlace de acceso no es válido.",
+    "login_how": "Ejecuta {cmd} en esta computadora para ver el enlace.",
     "v_id": "Falta el id de la tarjeta.", "v_action": "Acción desconocida.", "v_option": "Elige una opción.",
     "v_answers": "Responde primero las preguntas.", "v_text": "El texto está vacío.",
     "v_revise": "Escribe qué debe cambiar.", "v_next": "Marca de 1 a 3 pasos distintos.",
     "v_note": "La nota es demasiado larga.",
     "js_err_net": "Sin conexión. Vuelve a intentar.", "js_viewer": "Visor de fotos", "js_close": "Cerrar",
     "js_prev": "Anterior", "js_next": "Siguiente", "js_open_tab": "Abrir en otra pestaña", "js_count": "{i} de {n}",
+    "js_err_login": "Se cerró la sesión. Abre otra vez tu enlace de acceso (polar ui-url) y recarga.",
 }
 
 TABLES = {"en": EN, "es": ES}
