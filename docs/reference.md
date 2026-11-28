@@ -280,6 +280,8 @@ polar mail thread <threadId>                            # messages: from, to, cc
 polar mail draft --thread <threadId> --text-file F [--cc a@example.com]   # Gmail draft reply; prints {"draft_id"}
 polar ask email --thread <threadId> --title T --context T --text-file F [--cc a@example.com]
 polar thread <channel> <thread_ts>                      # Slack thread, JSON lines, same fields as `polar inbox`
+#   rows carry sender_id and sender_name (real name, cached 7 days in slack-users.json; `polar inbox` too);
+#   a voice clip in `files` has `transcript` (from the Slack captions, or the preview with « …») when Slack made one
 ```
 
 The `email` card works like a `reply` card: it quotes the last message of the thread, and has Enviar, Editar,

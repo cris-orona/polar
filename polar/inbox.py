@@ -4,7 +4,102 @@ Prints one JSON line per message (ts, channel, sender, short text, permalink). T
 this process, so a laptop script can call `polar inbox` over SSH without holding any Slack token."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import json
+import time
+import urllib.request
+from typing import Any, Callable, Dict, List, Optional
+
+NAME_TTL = 7 * 86400
+NAME_RETRY = 600  # a failed lookup is not asked again for 10 minutes (the inbox loop runs every 20 s)
+VTT_TIMEOUT = 15
+_failed: Dict[str, float] = {}
+
+
+def _names_path():
+    from polar import db
+    return db.data_dir() / "slack-users.json"
+
+
+def user_name(client: Any, uid: Optional[str]) -> Optional[str]:
+    """Real name of a Slack user. One id is asked at most once per 7 days (file cache). Never raises."""
+    if not uid:
+        return None
+    try:
+        path = _names_path()
+        cache: Dict[str, Any] = {}
+        try:
+            cache = json.loads(path.read_text("utf-8"))
+            if not isinstance(cache, dict):
+                cache = {}
+        except Exception:
+            cache = {}
+        hit = cache.get(uid)
+        now = time.time()
+        if isinstance(hit, dict) and hit.get("name") and now - float(hit.get("at") or 0) < NAME_TTL:
+            return hit["name"]
+        if now - _failed.get(uid, 0) < NAME_RETRY:
+            return None
+        try:
+            name = (client.users_info(user=uid)["user"].get("real_name") or "").strip()
+        except Exception:
+            name = ""
+        if not name:
+            _failed[uid] = now
+            return None
+        cache[uid] = {"name": name, "at": now}
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(cache, ensure_ascii=False), "utf-8")
+            tmp.replace(path)
+        except Exception:
+            pass
+        return name
+    except Exception:
+        return None
+
+
+def vtt_to_text(vtt: str) -> str:
+    """Plain text of a WebVTT caption file: no header, no cue time lines, no leading «- », one space between lines."""
+    out: List[str] = []
+    for line in (vtt or "").replace("\ufeff", "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("WEBVTT") or "-->" in line:
+            continue
+        if line.startswith("- "):
+            line = line[2:].strip()
+        if line:
+            out.append(line)
+    return " ".join(out)
+
+
+def download_vtt(url: str, token: str) -> str:
+    """GET a caption file from files.slack.com with the user token. The token is never logged."""
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+    with urllib.request.urlopen(req, timeout=VTT_TIMEOUT) as r:  # noqa: S310 (a Slack URL)
+        return r.read().decode("utf-8", "replace")
+
+
+def transcript_of(f: Dict[str, Any], token: str, fetch_vtt: Callable[[str, str], str] = download_vtt) -> Optional[str]:
+    """Transcript of a Slack audio clip, or None. Never raises."""
+    try:
+        tr = f.get("transcription") or {}
+        if tr.get("status") != "complete":
+            return None
+        if f.get("vtt") and token:
+            try:
+                text = vtt_to_text(fetch_vtt(f["vtt"], token))
+                if text:
+                    return text
+            except Exception:
+                pass
+        prev = tr.get("preview") or {}
+        text = (prev.get("content") or "").strip()
+        if not text:
+            return None
+        return text + (" …" if prev.get("has_more") else "")
+    except Exception:
+        return None
 
 
 def queries(owner: str) -> List[str]:
@@ -59,6 +154,7 @@ def fetch(client: Any, owner: str, since_ts: float, limit: int = 20, skip_users:
                 "channel_name": ch.get("name"),
                 "is_dm": bool(ch.get("is_im") or ch.get("is_mpim")),
                 "sender": m.get("username") or m.get("user"),
+                "sender_id": m.get("user"),
                 "text": (m.get("text") or "")[:200],
                 "permalink": m.get("permalink"),
             }
@@ -85,8 +181,17 @@ def fetch(client: Any, owner: str, since_ts: float, limit: int = 20, skip_users:
                     seen[key] = {
                         "ts": ts, "channel": ch, "channel_name": (m.get("channel") or {}).get("name"),
                         "is_dm": False, "thread_ts": root, "sender": m.get("username") or m.get("user"),
+                        "sender_id": m.get("user"),
                         "text": (m.get("text") or "")[:200], "permalink": m.get("permalink"),
                     }
+    names: Dict[str, Optional[str]] = {}
+    for r in seen.values():
+        uid = r.get("sender_id")
+        if uid:
+            if uid not in names:
+                names[uid] = user_name(client, uid)
+            if names[uid]:
+                r["sender_name"] = names[uid]
     return sorted(seen.values(), key=lambda r: float(r["ts"]))
 
 
@@ -111,7 +216,8 @@ def run(since_ts: float, owner: Optional[str] = None) -> List[Dict[str, Any]]:
 
 
 def thread_messages(client: Any, channel: str, thread_ts: str, base_url: str = "",
-                    channel_name: Optional[str] = None) -> List[Dict[str, Any]]:
+                    channel_name: Optional[str] = None,
+                    fetch_vtt: Callable[[str, str], str] = download_vtt) -> List[Dict[str, Any]]:
     """Every message of one Slack thread, with the same fields as `polar inbox` (text is not clipped)."""
     out: List[Dict[str, Any]] = []
     cursor = None
@@ -131,10 +237,22 @@ def thread_messages(client: Any, channel: str, thread_ts: str, base_url: str = "
                 "ts": ts, "channel": channel, "channel_name": channel_name,
                 "is_dm": channel.startswith("D"), "thread_ts": m.get("thread_ts") or thread_ts,
                 "sender": m.get("username") or m.get("user"),
+                "sender_id": m.get("user"),
                 "text": m.get("text") or "", "permalink": link or None,
             }
-            attached = [{"id": f.get("id"), "name": f.get("name"), "mimetype": f.get("mimetype")}
-                        for f in m.get("files") or [] if f.get("id")]
+            sname = user_name(client, m.get("user"))
+            if sname:
+                row["sender_name"] = sname
+            token = str(getattr(client, "token", "") or "")
+            attached = []
+            for f in m.get("files") or []:
+                if not f.get("id"):
+                    continue
+                item = {"id": f.get("id"), "name": f.get("name"), "mimetype": f.get("mimetype")}
+                tx = transcript_of(f, token, fetch_vtt)
+                if tx:
+                    item["transcript"] = tx
+                attached.append(item)
             if attached:
                 row["files"] = attached  # download one with `polar files <id>`
             out.append(row)

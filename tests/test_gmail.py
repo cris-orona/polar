@@ -292,7 +292,7 @@ def test_thread_messages_paginates_with_inbox_fields():
     c = FakeSlack()
     rows = inbox.thread_messages(c, "C1", "1.0", "https://x.slack.com/", "general")
     assert [r["ts"] for r in rows] == ["1.0", "2.0", "3.0"]
-    assert set(rows[0]) == {"ts", "channel", "channel_name", "is_dm", "thread_ts", "sender", "text", "permalink"}
+    assert set(rows[0]) == {"ts", "channel", "channel_name", "is_dm", "thread_ts", "sender", "sender_id", "text", "permalink"}
     assert rows[1]["permalink"] == "https://x.slack.com/archives/C1/p20?thread_ts=1.0&cid=C1"
     assert c.calls[1]["cursor"] == "NEXT"
 
