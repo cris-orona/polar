@@ -10,6 +10,8 @@ import logging
 import os
 import re
 import secrets
+import subprocess
+import sys
 import threading
 import uuid
 import time
@@ -24,6 +26,7 @@ log = logging.getLogger("polar")
 DEFAULT_PORT = 8791
 MAX_BODY = 64 * 1024
 SRC = "web"
+SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 def token_path() -> Path:
@@ -135,6 +138,17 @@ def perform(polar: Polar, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     req = db.get(polar.conn, rid)
     if not req:
         return 409, {"ok": False, "error": "No existe esa tarjeta."}
+    if action == "respond":
+        try:
+            if not respond_on():
+                raise ActionError("La caja Responder está apagada.", 403)
+            if req["status"] not in ("shown", "noted"):
+                return _respond_closed(polar, req, body)
+        except ActionError as exc:
+            out = {"ok": False, "error": exc.error}
+            if exc.code in (403, 409):
+                out["status"] = _status(polar, rid)
+            return exc.code, out
     if action in ("later", "fu_cancel"):
         return _followup_action(polar, req, action, body)
     try:
@@ -166,13 +180,18 @@ def _followup_action(polar: Polar, req: Dict[str, Any], action: str, body: Dict[
     return 200, {"ok": True, "followup": data}
 
 
+def respond_on() -> bool:
+    """The «Responder» box is off until POLAR_RESPOND=on."""
+    return (os.environ.get("POLAR_RESPOND") or "").strip().lower() == "on"
+
+
 GATED = ("send", "prod")  # actions with an effect outside this machine
 
 
 def allowed() -> Tuple[str, ...]:
     """The gated actions that POLAR_WEB_ALLOW turns on (a comma list of «send» and «prod»). Default: none."""
     asked = {x.strip() for x in (os.environ.get("POLAR_WEB_ALLOW") or "").split(",")}
-    return tuple(g for g in GATED if g in asked)
+    return tuple(g for g in GATED if g in asked) + (("respond",) if respond_on() else ())
 
 
 def is_prod_op(req: Dict[str, Any]) -> bool:
@@ -241,6 +260,8 @@ def _run(polar: Polar, req: Dict[str, Any], action: str, body: Dict[str, Any]) -
         if any(not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < len(steps) for i in idxs):
             raise ActionError("Seguimiento no válido.", 400)
         polar.on_next(owner, rid, src=SRC, indexes=idxs)
+    elif action == "respond":
+        _respond(polar, req, body)
     else:
         raise ActionError("Acción desconocida.", 400)
     # The core refuses in silence. A status that did not change means this call did not act.
@@ -248,7 +269,131 @@ def _run(polar: Polar, req: Dict[str, Any], action: str, body: Dict[str, Any]) -
         raise ActionError("La tarjeta ya cambió (estado: %s)." % _status(polar, rid), 409)
 
 
-def _answer(polar: Polar, req: Dict[str, Any], body: Dict[str, Any]) -> None:
+def _clip(text: str, n: int = 80) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
+def _note_of(body: Dict[str, Any]) -> str:
+    note = body.get("note")
+    if note is None:
+        return ""
+    if not isinstance(note, str):
+        raise ActionError("La nota no es texto.", 400)
+    note = note.strip()
+    if len(note) > db.MAX_REPLY_CHARS:
+        raise ActionError("Máximo %d caracteres." % db.MAX_REPLY_CHARS, 400)
+    return note
+
+
+def _stored(summary: str, note: str) -> Dict[str, Any]:
+    """What the card keeps of one «Responder» answer. polar-notify builds the one agent line from it."""
+    out: Dict[str, Any] = {"respond_summary": summary}
+    if note:
+        out["respond_note"] = note
+    return out
+
+
+def _respond(polar: Polar, req: Dict[str, Any], body: Dict[str, Any]) -> None:
+    """One «Responder» answer on an open card: the same core call as the Slack button, with the note along."""
+    kind, rid, owner = req["kind"], req["id"], polar.owner_id
+    note = _note_of(body)
+    option, answers, indexes = body.get("option"), body.get("answers"), body.get("indexes")
+    given = [x for x in (option, answers, indexes) if x is not None]
+    if not given and not note:
+        raise ActionError("Escribe una respuesta.", 400)
+    if len(given) > 1:
+        raise ActionError("Responde con una sola cosa: opción, respuestas o seguimientos.", 400)
+    _need(req, ("reply", "decision", "email", "report", "questions"), ("shown", "noted"))
+    if option is not None:
+        if kind == "decision":
+            keys = [o["key"] for o in req["options"]]
+            if not isinstance(option, str) or option not in keys:
+                raise ActionError("Opción no válida.", 400)
+            if is_prod_op(req):
+                _gate("prod", "El Go de un paso de producción")
+            summary = "eligió %d) %s" % (keys.index(option) + 1, _clip(req["options"][keys.index(option)]["label"]))
+        elif kind == "report" and option in ("ok", "resume"):
+            if option == "resume" and not (req.get("report") or {}).get("resume"):
+                raise ActionError("Opción no válida.", 400)
+            summary = "eligió «%s»" % option
+        else:
+            raise ActionError("Opción no válida.", 400)
+        polar.on_choose(owner, rid, option, src=SRC, and_continue=bool(body.get("and_continue")),
+                        respond=_stored(summary, note))
+    elif answers is not None:
+        if kind != "questions":
+            raise ActionError("Esta tarjeta no tiene preguntas.", 400)
+        _answer(polar, req, body, respond=True)
+    elif indexes is not None:
+        if kind != "report":
+            raise ActionError("Esta tarjeta no tiene seguimientos.", 400)
+        steps = (req.get("report") or {}).get("next") or []
+        if (not isinstance(indexes, list) or not 1 <= len(indexes) <= min(len(steps), db.MAX_REPORT_NEXT)
+                or len(set(map(repr, indexes))) != len(indexes)
+                or any(not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < len(steps) for i in indexes)):
+            raise ActionError("Seguimiento no válido.", 400)
+        summary = "eligió " + ", ".join("%d) %s" % (i + 1, _clip(steps[i])) for i in sorted(indexes))
+        polar.on_next(owner, rid, src=SRC, indexes=indexes, respond=_stored(summary, note))
+    else:
+        polar.on_revise_submit(owner, blocks.text_view(note, rid), src=SRC,
+                               respond=_stored("pidió cambios", note))
+    if _status(polar, rid) == req["status"]:
+        raise ActionError("La tarjeta ya cambió (estado: %s)." % _status(polar, rid), 409)
+
+
+def _bus_bin() -> str:
+    return os.environ.get("AGENT_BUS_BIN") or os.path.join(os.path.expanduser("~"), ".local/bin/agent-bus")
+
+
+def _session_of(req: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    """(session id, pane or tmux name) of the card's requester «<session id> <pane>». A prod-op card names
+    «prod-op <op id> <session id> <pane>». ("", None) when there is no session."""
+    parts = (req.get("requester") or "").split()
+    if parts[:1] == ["prod-op"]:
+        parts = parts[2:]
+    if not parts or not SESSION_ID.fullmatch(parts[0]):
+        return "", None
+    return parts[0], parts[1] if len(parts) > 1 else None
+
+
+def _respond_closed(polar: Polar, req: Dict[str, Any], body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    """A note on a card that is not open: Polar tells the requester's session at once, with agent-bus."""
+    rid = req["id"]
+    try:
+        note = _note_of(body)
+        if any(body.get(k) is not None for k in ("option", "answers", "indexes")):
+            raise ActionError("La tarjeta ya no está abierta (estado: %s)." % req["status"], 409)
+        if not note:
+            raise ActionError("Escribe una nota.", 400)
+        sid, place = _session_of(req)
+        if not sid:
+            raise ActionError("Esta tarjeta no tiene agente.", 409)
+    except ActionError as exc:
+        out: Dict[str, Any] = {"ok": False, "error": exc.error}
+        if exc.code in (403, 409):
+            out["status"] = req["status"]
+        return exc.code, out
+    text = ("Polar (respuesta): the owner wrote more about your card %s «%s». Nota: %s"
+            % (rid, req["title"], note))
+    cmd = [sys.executable, _bus_bin(), "deliver", sid, "--text-file", "-", "--from", "polar",
+           "--ref", "polar:%s:%s" % (rid, uuid.uuid4().hex[:8])]
+    if place:
+        cmd += ["--place", place]
+    try:
+        done = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=120).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        done = False
+    if not done:
+        log.error("respond: agent-bus did not take the note for %s", rid)
+        return 502, {"ok": False, "status": req["status"], "error": "No se pudo avisar al agente."}
+    res = dict(req.get("result") or {})
+    res.setdefault("owner_notes", []).append({"at": db.now_iso(), "text": note})
+    db.set_result_any(polar.conn, rid, res)
+    return 200, {"ok": True, "status": "Entregado al agente."}
+
+
+def _answer(polar: Polar, req: Dict[str, Any], body: Dict[str, Any], respond: bool = False) -> None:
     _need(req, ("questions",), ("shown",))
     rid, owner = req["id"], polar.owner_id
     given = body.get("answers")
@@ -283,7 +428,17 @@ def _answer(polar: Polar, req: Dict[str, Any], body: Dict[str, Any]) -> None:
             _refused(polar.on_q_submit(owner, blocks.text_view(text, json.dumps({"id": rid, "q": qkey}))))
     if note and note.strip():
         _refused(polar.on_q_submit(owner, blocks.text_view(note.strip(), json.dumps({"id": rid, "q": None}))))
-    polar.on_q_send(owner, rid, src=SRC)
+    stored = None
+    if respond:
+        shown = dict(blocks.answers_of(req))
+        for qkey, okey, text in plan:
+            q = questions[qkey]
+            label = next((o["label"] for o in q.get("options", []) if o["key"] == okey), text)
+            shown[qkey] = {"text": label}
+        stored = _stored("eligió " + ", ".join(
+            "%d) %s" % (i, _clip(blocks.answer_text(shown[q["key"]])))
+            for i, q in enumerate(req["options"], 1)), (note or "").strip())
+    polar.on_q_send(owner, rid, src=SRC, respond=stored)
 
 
 LENGTH_RE = re.compile(r"[0-9]{1,7}")

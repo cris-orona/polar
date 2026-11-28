@@ -584,6 +584,11 @@ def set_result(conn: Any, rid: str, result: Dict[str, Any]) -> bool:
     return cur.rowcount == 1
 
 
+def set_result_any(conn: Any, rid: str, result: Dict[str, Any]) -> None:
+    """Replace the result of a card in any status (the owner's late notes are added to a closed card)."""
+    conn.execute("UPDATE requests SET result_json=? WHERE id=?", (json.dumps(result, ensure_ascii=False), rid))
+
+
 def set_final_text(conn: sqlite3.Connection, rid: str, text: str) -> bool:
     cur = conn.execute(
         "UPDATE requests SET final_text=? WHERE id=? AND status='shown' AND kind IN ('reply','email')",

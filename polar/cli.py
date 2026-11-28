@@ -37,6 +37,8 @@ def _public(req: Dict[str, Any]) -> Dict[str, Any]:
         "and_continue": int(req.get("and_continue") or 0),
         **({"instructions": res["instructions"]} if res.get("instructions") else {}),
         **({"via": res["via"]} if res.get("via") else {}),
+        **({"respond_summary": res.get("respond_summary"), "respond_note": res["respond_note"]}
+           if res.get("respond_note") else {}),
         **({"indexes": res["indexes"], "steps": res["steps"]} if res.get("steps") else {}),
         **({"replaces": req["replaces"]} if req.get("replaces") else {}),
         **({"silent": True} if req.get("silent") else {}),

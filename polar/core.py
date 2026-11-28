@@ -871,8 +871,8 @@ class Polar:
             return self._stale(rid)
         self._open_modal(req, trigger_id, blocks.revise_modal(req), "revise")
 
-    def on_revise_submit(self, user_id: str, view: Dict[str, Any],
-                         src: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def on_revise_submit(self, user_id: str, view: Dict[str, Any], src: Optional[str] = None,
+                         respond: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """Return a Slack error response, or None when the request is saved."""
         if not self.is_owner(user_id):
             return None
@@ -882,7 +882,7 @@ class Polar:
         if len(text) > db.MAX_REPLY_CHARS:
             return {"response_action": "errors", "errors": {
                 "text_block": f"Máximo {db.MAX_REPLY_CHARS} caracteres."}}
-        self._to_revise(view["private_metadata"], text, src=src)
+        self._to_revise(view["private_metadata"], text, src=src, extra=respond)
         return None
 
     @staticmethod
@@ -899,7 +899,7 @@ class Polar:
         return sorted(indexes)
 
     def on_next(self, user_id: str, rid: str, index: Optional[int] = None, src: Optional[str] = None,
-                indexes: Optional[List[int]] = None) -> None:
+                indexes: Optional[List[int]] = None, respond: Optional[Dict[str, Any]] = None) -> None:
         """The owner starts one or more follow-ups that the report suggests: same as «Pedir cambios» with that text.
         `index` is one follow-up; `indexes` is a list of distinct ones (1 to 3). One step: `instructions` is the
         step text. Several: one line «1) A 2) B»."""
@@ -916,7 +916,7 @@ class Polar:
             return
         texts = [steps[i] for i in picked]
         text = texts[0] if len(texts) == 1 else " ".join("%d) %s" % (n, t) for n, t in enumerate(texts, 1))
-        self._to_revise(rid, text, via="next", src=src, extra={"indexes": picked, "steps": texts})
+        self._to_revise(rid, text, via="next", src=src, extra=dict(respond or {}, indexes=picked, steps=texts))
 
     # -- scheduled follow-ups ------------------------------------------------
     def later(self, rid: str, key: Any) -> Dict[str, Any]:
@@ -1022,7 +1022,8 @@ class Polar:
             log.exception("card %s has no session and its task did not start", rid)
 
     def on_choose(self, user_id: str, rid: str, key: str, src: Optional[str] = None,
-                  and_continue: bool = False) -> None:
+                  and_continue: bool = False, respond: Optional[Dict[str, Any]] = None) -> None:
+        """`respond` (web «Responder» box only): {"respond_summary", "respond_note"}, stored with the result."""
         if not self.is_owner(user_id):
             return
         req = db.get(self.conn, rid)
@@ -1034,7 +1035,7 @@ class Polar:
             allowed = [o["key"] for o in req["options"]]
         if key not in allowed:
             return
-        fields = dict(result_json=_res(src, option=key), decided_at=db.now_iso())
+        fields = dict(result_json=_res(src, option=key, **(respond or {})), decided_at=db.now_iso())
         if and_continue and blocks.can_continue(req) and req["kind"] == "decision":
             fields["and_continue"] = 1
         if (db.transition(self.conn, rid, "shown", "chosen", **fields)
@@ -1194,7 +1195,8 @@ class Polar:
             return self._stale(rid)
         self.refresh_dm(rid)
 
-    def on_q_send(self, user_id: str, rid: str, src: Optional[str] = None) -> None:
+    def on_q_send(self, user_id: str, rid: str, src: Optional[str] = None,
+                  respond: Optional[Dict[str, Any]] = None) -> None:
         if not self.is_owner(user_id):
             return
         lost = False
@@ -1210,6 +1212,7 @@ class Polar:
                 final = {"answers": res.get("answers", {}), "note": res.get("note") or ""}
                 if src:
                     final["src"] = src
+                final.update(respond or {})
                 if not db.transition(self.conn, rid, "shown", "answered",
                                      result_json=json.dumps(final, ensure_ascii=False),
                                      decided_at=db.now_iso()):
