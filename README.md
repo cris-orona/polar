@@ -9,6 +9,19 @@ the approval.
 
 The story behind it: [How I run a software factory of coding agents](https://crisorona.me/blog/software-factory.html).
 
+## Try the demo
+
+See the web UI on sample cards in one minute. No Slack app, no token and no config:
+
+```sh
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+bin/polar demo                 # then open http://127.0.0.1:8792/
+bin/polar demo --lang es --port 8793
+```
+
+The demo makes a new temporary folder each time, seeds it with invented cards and starts only the web UI.
+The buttons work on that temporary database. Nothing goes to Slack or Gmail. Ctrl-C stops it and removes the folder.
+
 ## The problem
 
 - An agent that runs in auto mode should not post to Slack as you. It has no way to prove
@@ -68,9 +81,38 @@ Polar also has these optional features. They are all in the code today. Read `do
 - Web-first delivery and reminders: a local HTTP API records decisions from a web page. Polar can send reminder DMs instead of card DMs.
 - Gmail: `polar mail ...` and the `email` card.
 
+## Web UI
+
+`polar serve` also starts a small web UI when `POLAR_UI_PORT` is set (for example `8790`). It has three pages:
+
+- **Pending**: the cards that wait for you (decisions, questions, replies and emails), then the reports you have not
+  seen. Each card has the same actions as in Slack: choose, answer, send, discard, request changes, next steps, seen.
+  Pictures open in a photo viewer. `/?c=<id>` puts one card first.
+- **History**: the decided cards, grouped by day, newest first.
+- **Reports**: every report, with a search box. `/reports/<id>` (or `/informes/<id>`) is one full report.
+
+Each button runs the same core method as the Slack button, in the same process, so the Slack card updates too.
+Send stays off until you set `POLAR_WEB_ALLOW=send`. The page refreshes itself when a card changes, but not while you type.
+The UI is in English or Spanish (`POLAR_UI_LANG=en|es`). It is server-rendered HTML with one small script and
+one style sheet: no Node, no build step, no external assets. The only new dependency is `Markdown`.
+
+The UI binds to 127.0.0.1 only. To open it from your phone, put a reverse proxy in front of it that you trust (for
+example Tailscale Serve, or nginx with your own login):
+
+- add the public host name to `POLAR_UI_HOSTS` (the UI refuses any other `Host` header), and
+- set `POLAR_UI_OWNER` to your login and `POLAR_UI_OWNER_HEADER` to the header your proxy sets
+  (default `Tailscale-User-Login`). The UI then refuses a request without that exact value.
+
+Do not expose the port to a network without such a proxy. Set `POLAR_WEB_URL` to the URL you open, so Slack
+reminders and report cards link to it.
+
 ## Screenshots
 
-_Screenshots to be added._
+![Pending page: two decisions, a questions card, a reply and an email wait for an answer](docs/img/pending.png)
+
+![A full report with a table, a chart and next-step buttons](docs/img/report.png)
+
+![History page: decided cards grouped by day with their outcome](docs/img/history.png)
 
 ## Install
 
@@ -118,12 +160,17 @@ Edit the plist first (label, owner id, URLs).
 | `POLAR_DATA_DIR` | `<repo>/data` | SQLite file, web token, downloaded files, Gmail files. |
 | `POLAR_TOKEN_DIR` | `~/.config/polar` | Folder for token files. |
 | `POLAR_BOT_TOKEN`, `POLAR_APP_TOKEN`, `POLAR_USER_TOKEN` | none | Token fallback. |
-| `POLAR_TZ` | `UTC` | Time zone for reminder quiet hours. |
+| `POLAR_TZ` | `UTC` | Time zone for reminder quiet hours. The web UI uses it for dates; unset, the UI uses the system zone. |
 | `POLAR_DELIVERY` | `dm` | `web` stops the card DMs (a web page shows the cards instead). |
 | `POLAR_SLACK_REMINDERS` | `on` | `off` stops the reminder DMs. |
 | `POLAR_WEB_PORT` | `8791` | Local web API port, bound to 127.0.0.1. `0` turns it off. |
 | `POLAR_WEB_ALLOW` | none | Comma list (`send`, `prod`) that enables gated web actions. |
-| `POLAR_WEB_URL` | none | Base URL of your web page. Adds a "full report" link to report cards. |
+| `POLAR_WEB_URL` | none | Base URL of your web page (the web UI URL). Adds a "full report" link to report cards and links in reminders. |
+| `POLAR_UI_PORT` | none | Port of the web UI, bound to 127.0.0.1. Unset or `0`: the UI is off. |
+| `POLAR_UI_HOSTS` | none | Comma list of extra `Host` values the UI accepts (the host name of your reverse proxy). |
+| `POLAR_UI_OWNER` | none | When set, every UI request must carry this value in the owner header. |
+| `POLAR_UI_OWNER_HEADER` | `Tailscale-User-Login` | The header that carries the login, set by your reverse proxy. |
+| `POLAR_UI_LANG` | `en` | Language of the web UI: `en` or `es`. |
 | `POLAR_TASK_MAX`, `POLAR_TASK_MIN_FREE_GB`, `POLAR_WORK_DIR` | see reference | Limits and folder for tmux task sessions. |
 | `POLAR_CLAUDE_BIN`, `POLAR_CLAUDE_ARGS`, `POLAR_TMUX_BIN` | see reference | How task sessions start. |
 | `POLAR_BIN` | `~/polar/bin/polar` | Path of the CLI as written in the task brief. |
@@ -148,6 +195,10 @@ More variables (timeouts, triage, Gmail) are in `docs/reference.md` and the sour
 - Token files must be 0600 in a 0700 folder.
 - The web API binds to 127.0.0.1, needs a bearer token (`data/web-token`, mode 0600), checks the `Host` header and limits the body size.
   Sending to other people and production steps from the web are off unless you set `POLAR_WEB_ALLOW`.
+- The web UI binds to 127.0.0.1 and accepts only its own `Host` values (plus `POLAR_UI_HOSTS`). With `POLAR_UI_OWNER`
+  set, it also needs the owner header from your proxy. Each POST needs a same-site `Origin` and a CSRF token (an
+  HMAC from a per-install secret, `data/web-ui-secret`, mode 0600). Pages send a strict Content Security Policy with
+  no inline script, and every value is escaped. The UI serves files only from `data/files` and `data/uploads`.
 - A stale click on a card that is already decided does nothing.
 - Polar never starts a session with `--dangerously-skip-permissions`.
 
@@ -166,7 +217,7 @@ Read `SECURITY.md` to report a problem.
 
 ## Limitations
 
-- Card text, buttons and notices are in Spanish today. There is no translation layer yet.
+- Slack card text, buttons and notices are in Spanish today. The web UI has English and Spanish.
 - Single owner. There is no multi-user or multi-workspace mode.
 - macOS first: the keychain lookup, the LaunchAgent and the free-memory check use macOS tools. Token files and env vars work elsewhere.
 - Some code is tied to the author's setup (see below). It works without that setup, but the names are still in the code.
