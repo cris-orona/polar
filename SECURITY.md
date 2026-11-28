@@ -33,9 +33,11 @@ The web UI (`polar/web/`, on when `POLAR_UI_PORT` is set) applies these checks t
 - With `POLAR_UI_OWNER` set, the header `POLAR_UI_OWNER_HEADER` (default `Tailscale-User-Login`) must equal it
   (constant-time compare). Else 403. Your proxy must remove that header from incoming requests and set it itself.
 - Each POST needs the session cookie, an `Origin` that matches an allowed host and an `X-CSRF-Token` header. The
-  CSRF token is an HMAC of the secret and the session value. Body limit: 64 KB; a chunked body is refused.
-- Every answer with status 400 or more closes the connection, so a body that was not read is never parsed as a
-  second request. Error pages are short plain text with the same headers as a page and no Python version. A client
+  CSRF token is an HMAC of the secret and the session value. Body limit: 64 KB.
+- Request framing (UI and web API): a request with `Transfer-Encoding`, with more than one `Content-Length`, with a
+  `Content-Length` that is not 1 to 7 digits, or a GET or HEAD with a body gets 400 before any other check. Every
+  answer with status 400 or more closes the connection, and so does any answer sent before the body was read. So a
+  body is never parsed as a second request. If a file read fails after the headers went out, the connection closes. Error pages are short plain text with the same headers as a page and no Python version. A client
   that sends nothing for 30 s is disconnected.
 - Actions run through `webapi.perform`, with the same gates as the web API (`POLAR_WEB_ALLOW`).
 - Pages send `Content-Security-Policy` with `script-src 'self'` and no inline script, `frame-ancestors 'none'`,
@@ -43,7 +45,7 @@ The web UI (`polar/web/`, on when `POLAR_UI_PORT` is set) applies these checks t
 - Card text is escaped. Markdown is rendered with raw HTML shown as text, images removed and only http, https and
   same-site links kept.
 - `/files/<id>/<n>` serves only a file of that card whose real path is inside `data/files` or `data/uploads`.
-  Files other than pictures, PDF and plain text download.
+  Pictures and plain text show in the browser; every other file, PDF too, downloads.
 
 ## What the login protects against, and its limit
 

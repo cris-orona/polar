@@ -291,9 +291,7 @@ class Handler(webapi.CloseOnError):
     def do_HEAD(self) -> None:
         self.do_GET()
 
-    def do_GET(self) -> None:
-        if self.headers.get("Content-Length") not in (None, "0") or self.headers.get("Transfer-Encoding"):
-            self.close_connection = True  # a GET body is never read: do not parse it as the next request
+    def do_GET(self) -> None:  # framing (no body on GET, one plain length) is checked first, in parse_request
         if not self._guard():
             return
         path = urlparse(self.path).path
@@ -305,6 +303,9 @@ class Handler(webapi.CloseOnError):
             self.close_connection = True
         except Exception as exc:  # never a stack trace on a page
             log.error("web UI page failed: %s", type(exc).__name__)
+            if self.response_started:  # the headers went out: a 500 now would land inside the body
+                self.close_connection = True
+                return
             self._text(500, t("err_internal"))
 
     def _route_get(self) -> None:
@@ -370,7 +371,7 @@ class Handler(webapi.CloseOnError):
 
     def _file(self, path: str) -> None:
         parts = path.split("/")  # "", "files", id, n
-        if len(parts) != 4 or not parts[3].isdigit() or len(parts[2]) > 40:
+        if len(parts) != 4 or not (parts[3].isascii() and parts[3].isdigit()) or len(parts[2]) > 40:
             return self._text(404, t("not_found"))
         card = db.get(self.server.polar.conn, unquote(parts[2]))
         real = self.resolve_file(card, int(parts[3])) if card else None
@@ -400,21 +401,18 @@ class Handler(webapi.CloseOnError):
             return self._need_login(urlparse(self.path).path)
         if urlparse(self.path).path != "/api/act":
             return self._json(404, {"ok": False, "error": t("not_found")})
-        if self.headers.get("Transfer-Encoding"):  # only a plain Content-Length body is read
-            return self._json(411, {"ok": False, "error": t("err_bad")})
         if (self.headers.get("Origin") or "") not in self.server.origins:
             return self._json(403, {"ok": False, "error": t("err_origin")})
         got = self.headers.get("X-CSRF-Token") or ""
         if not got or not hmac.compare_digest(got.encode("utf-8"), self.server.csrf().encode("utf-8")):
             return self._json(403, {"ok": False, "error": t("err_csrf")})
-        try:
-            length = int(self.headers.get("Content-Length") or "")
-        except ValueError:
+        length = self.body_length()  # parse_request already refused Transfer-Encoding and bad lengths
+        if length is None:
             return self._json(411, {"ok": False, "error": t("err_bad")})
-        if length < 0 or length > MAX_BODY:
+        if length > MAX_BODY:
             return self._json(413, {"ok": False, "error": t("err_too_big")})
         try:
-            data = json.loads(self.rfile.read(length).decode("utf-8"))
+            data = json.loads(self.read_body(length).decode("utf-8"))
         except ValueError:
             return self._json(400, {"ok": False, "error": t("err_json")})
         payload, err = build_payload(data)
