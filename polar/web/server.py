@@ -16,7 +16,7 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from polar import db, webapi
 from polar.web import views
@@ -26,8 +26,9 @@ log = logging.getLogger("polar")
 MAX_BODY = 64 * 1024
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
        "form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
-FILE_CSP = "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'self'; sandbox"
-INLINE_OK = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain"}
+FILE_CSP = "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox"
+INLINE_OK = {"image/png", "image/jpeg", "image/gif", "image/webp", "text/plain"}  # a PDF is a download
+CHUNK = 64 * 1024
 STATIC_FILES = {"app.css": "text/css; charset=utf-8", "app.js": "text/javascript; charset=utf-8"}
 ACTIONS = ("choose", "answer", "send", "discard", "revise", "next", "seen")
 COOKIE = "polar_ui"
@@ -75,6 +76,14 @@ def ui_port() -> Optional[int]:
 
 def _too_long(value: str) -> bool:
     return len(value.strip()) > db.MAX_REPLY_CHARS  # the core counts the text after strip
+
+
+def disposition(kind: str, name: str) -> str:
+    """A Content-Disposition value that cannot break the header: no control characters, quotes or backslashes,
+    an ASCII `filename` for old clients and the full name as RFC 5987 `filename*`."""
+    clean = "".join(c for c in name if c >= " " and c not in '"\\\x7f' and not 0x80 <= ord(c) < 0xa0).strip() or "file"
+    ascii_name = "".join(c if " " <= c < "\x7f" else "_" for c in clean)
+    return "%s; filename=\"%s\"; filename*=UTF-8''%s" % (kind, ascii_name, quote(clean, safe=""))
 
 
 def build_payload(data: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -215,9 +224,14 @@ class Handler(webapi.CloseOnError):
     def _send(self, code: int, body: Any, ctype: str = "text/html; charset=utf-8",
               extra: Optional[Dict[str, str]] = None, csp: str = CSP) -> None:
         data = body.encode("utf-8") if isinstance(body, str) else body
+        self._head(code, ctype, len(data), extra, csp)
+        if getattr(self, "command", None) != "HEAD":
+            self.wfile.write(data)
+
+    def _head(self, code: int, ctype: str, length: int, extra: Optional[Dict[str, str]], csp: str) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Length", str(length))
         self.send_header("Content-Security-Policy", csp)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -227,8 +241,6 @@ class Handler(webapi.CloseOnError):
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
-        if getattr(self, "command", None) != "HEAD":
-            self.wfile.write(data)
 
     def _json(self, code: int, obj: Dict[str, Any]) -> None:
         self._send(code, json.dumps(obj, ensure_ascii=False), "application/json; charset=utf-8")
@@ -365,13 +377,21 @@ class Handler(webapi.CloseOnError):
         if not real:
             return self._text(404, t("not_found"))
         ctype = mimetypes.guess_type(real)[0] or "application/octet-stream"
-        name = os.path.basename(real).replace('"', "")
         disp = "inline" if ctype in INLINE_OK else "attachment"
         with open(real, "rb") as fh:
-            data = fh.read()
-        self._send(200, data, ctype + ("; charset=utf-8" if ctype == "text/plain" else ""),
-                   {"Content-Disposition": '%s; filename="%s"' % (disp, name.encode("ascii", "replace").decode())},
-                   csp=FILE_CSP)
+            size = os.fstat(fh.fileno()).st_size
+            self._head(200, ctype + ("; charset=utf-8" if ctype == "text/plain" else ""), size,
+                       {"Content-Disposition": disposition(disp, os.path.basename(real))}, FILE_CSP)
+            if self.command == "HEAD":
+                return
+            left = size  # stream: a large file never sits in memory, and never more bytes than Content-Length
+            while left > 0:
+                chunk = fh.read(min(CHUNK, left))
+                if not chunk:
+                    self.close_connection = True  # the file shrank: the client must not wait for the rest
+                    return
+                self.wfile.write(chunk)
+                left -= len(chunk)
 
     def do_POST(self) -> None:
         if not self._guard():
