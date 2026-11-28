@@ -55,7 +55,7 @@ EN: Dict[str, str] = {
     "v_id": "The card id is missing.", "v_action": "Unknown action.", "v_option": "Choose an option.",
     "v_answers": "Answer the questions first.", "v_text": "The text is empty.",
     "v_revise": "Write what should change.", "v_next": "Select 1 to 3 different next steps.",
-    "v_note": "The note is too long.",
+    "v_too_long": "The text is too long: at most {n} characters.",
     # page script (static/app.js)
     "js_err_net": "No connection. Try again.", "js_viewer": "Photo viewer", "js_close": "Close",
     "js_prev": "Previous", "js_next": "Next", "js_open_tab": "Open in a new tab", "js_count": "{i} of {n}",
@@ -104,7 +104,7 @@ ES: Dict[str, str] = {
     "v_id": "Falta el id de la tarjeta.", "v_action": "Acción desconocida.", "v_option": "Elige una opción.",
     "v_answers": "Responde primero las preguntas.", "v_text": "El texto está vacío.",
     "v_revise": "Escribe qué debe cambiar.", "v_next": "Marca de 1 a 3 pasos distintos.",
-    "v_note": "La nota es demasiado larga.",
+    "v_too_long": "El texto es demasiado largo: máximo {n} caracteres.",
     "js_err_net": "Sin conexión. Vuelve a intentar.", "js_viewer": "Visor de fotos", "js_close": "Cerrar",
     "js_prev": "Anterior", "js_next": "Siguiente", "js_open_tab": "Abrir en otra pestaña", "js_count": "{i} de {n}",
     "js_err_login": "Se cerró la sesión. Abre otra vez tu enlace de acceso (polar ui-url) y recarga.",

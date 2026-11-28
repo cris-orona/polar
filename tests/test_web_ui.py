@@ -647,3 +647,69 @@ def test_demo_cli_parser():
     from polar import cli
     args = cli.build_parser().parse_args(["demo", "--port", "8793", "--lang", "es"])
     assert args.cmd == "demo" and args.port == 8793 and args.lang == "es"
+
+
+# -- length limits and core refusals -------------------------------------------------------------------------------------
+LONG = "x" * (db.MAX_REPLY_CHARS + 1)
+
+
+def two_questions(conn):
+    rid = db.create_request(conn, "questions", "Q", "c", "s", options=[
+        {"key": "one", "text": "First?", "options": [{"key": "y", "label": "Yes"}, {"key": "n", "label": "No"}]},
+        {"key": "two", "text": "Free?", "options": []}])
+    show(conn, rid)
+    return rid
+
+
+def test_long_texts_are_refused_with_the_limit(ui, conn, reply_id, decision_id, user, monkeypatch):
+    monkeypatch.setenv("POLAR_WEB_ALLOW", "send")
+    show(conn, reply_id)
+    show(conn, decision_id)
+    want = strings.t("v_too_long", n=db.MAX_REPLY_CHARS)
+    assert str(db.MAX_REPLY_CHARS) in want
+    before = db.get(conn, reply_id)
+    assert post(ui, {"id": reply_id, "action": "send", "text": LONG}) == (400, {"ok": False, "error": want})
+    after = db.get(conn, reply_id)
+    assert after["status"] == "shown" and after["final_text"] == before["final_text"] and not user.of("chat_postMessage")
+    assert post(ui, {"id": decision_id, "action": "revise", "text": LONG})[1]["error"] == want
+    assert db.get(conn, decision_id)["status"] == "shown"
+    qid = two_questions(conn)
+    assert post(ui, {"id": qid, "action": "answer", "answers": {"one": "y", "two": LONG}})[1]["error"] == want
+    assert post(ui, {"id": qid, "action": "answer", "answers": {"one": "y", "two": "ok"}, "note": LONG})[1]["error"] == want
+    assert db.get(conn, qid)["status"] == "shown" and not (db.get(conn, qid)["result"] or {}).get("answers")
+    # the limit counts the text after strip, as the core does
+    edge = "  " + "y" * db.MAX_REPLY_CHARS + "  "
+    assert post(ui, {"id": reply_id, "action": "send", "text": edge})[0] == 200
+
+
+def test_refused_edit_never_sends_the_old_draft(ui, conn, reply_id, user, monkeypatch, polar):
+    monkeypatch.setenv("POLAR_WEB_ALLOW", "send")
+    show(conn, reply_id)
+    monkeypatch.setattr(polar, "on_edit_submit", lambda owner, view: {
+        "response_action": "errors", "errors": {"text_block": "no"}})
+    code, out = post(ui, {"id": reply_id, "action": "send", "text": "New words"})
+    assert code == 400 and not out["ok"] and out["error"] == strings.t("err_bad")
+    assert db.get(conn, reply_id)["status"] == "shown" and not user.of("chat_postMessage")
+    monkeypatch.setattr(polar, "on_edit_submit", lambda owner, view: None)  # «saved» but nothing changed
+    code, out = post(ui, {"id": reply_id, "action": "send", "text": "New words"})
+    assert code == 409 and db.get(conn, reply_id)["status"] == "shown" and not user.of("chat_postMessage")
+
+
+def test_refused_answer_is_reported(ui, conn, polar, monkeypatch):
+    qid = two_questions(conn)
+    monkeypatch.setattr(polar, "on_q_submit", lambda owner, view: {
+        "response_action": "errors", "errors": {"text_block": "no"}})
+    code, out = post(ui, {"id": qid, "action": "answer", "answers": {"one": "y", "two": "Friday"}})
+    assert code == 400 and db.get(conn, qid)["status"] == "shown"
+
+
+def test_specific_400_texts_reach_the_page(ui, conn):
+    qid = two_questions(conn)
+    code, out = post(ui, {"id": qid, "action": "answer", "answers": {"one": "y"}})
+    assert code == 400 and out["error"] == strings.t("v_answers")
+    assert server.ui_error(400, {"error": "Máximo 2600 caracteres."}) == strings.t("v_too_long", n=db.MAX_REPLY_CHARS)
+    assert server.ui_error(400, {"error": "Opción no válida."}) == strings.t("v_option")
+    assert server.ui_error(400, {"error": "Seguimiento no válido."}) == strings.t("v_next")
+    assert server.ui_error(400, {"error": "Something else"}) == strings.t("err_bad")
+    js = (Path(views.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "r.data && r.data.error" in js  # the page shows the server text

@@ -64,6 +64,13 @@ def _text(value: Any, what: str) -> str:
     return text
 
 
+def _refused(err: Any) -> None:
+    """The core returns a Slack modal error dict when it refuses a typed text. Raise it as a 400."""
+    if err:
+        text = ((err.get("errors") or {}).get("text_block") if isinstance(err, dict) else None) or "Texto no válido."
+        raise ActionError(str(text), 400)
+
+
 def new_task(polar: Polar, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     """The owner writes a task in the web composer: the same path as a DM to Polar. A notice in the owner DM is the
     thread of the task (triage finds the session that owns the subject, or a new session starts)."""
@@ -209,7 +216,10 @@ def _run(polar: Polar, req: Dict[str, Any], action: str, body: Dict[str, Any]) -
         _gate("send", "Enviar un mensaje a otra persona")
         if body.get("text") is not None:
             text = _text(body["text"], "el texto editado")
-            polar.on_edit_submit(owner, blocks.text_view(text, rid))
+            _refused(polar.on_edit_submit(owner, blocks.text_view(text, rid)))
+            # The edit must be stored before the send: else the old draft would go out.
+            if (db.get(polar.conn, rid) or {}).get("final_text") != text:
+                raise ActionError("La tarjeta ya cambió (estado: %s)." % _status(polar, rid), 409)
         polar.on_send(owner, rid, src=SRC)
     elif action == "discard":
         _need(req, db.REPLY_KINDS, ("shown",))
@@ -269,9 +279,9 @@ def _answer(polar: Polar, req: Dict[str, Any], body: Dict[str, Any]) -> None:
         if okey is not None:
             polar.on_q_answer(owner, rid, qkey, okey)
         else:
-            polar.on_q_submit(owner, blocks.text_view(text, json.dumps({"id": rid, "q": qkey})))
+            _refused(polar.on_q_submit(owner, blocks.text_view(text, json.dumps({"id": rid, "q": qkey}))))
     if note and note.strip():
-        polar.on_q_submit(owner, blocks.text_view(note.strip(), json.dumps({"id": rid, "q": None})))
+        _refused(polar.on_q_submit(owner, blocks.text_view(note.strip(), json.dumps({"id": rid, "q": None}))))
     polar.on_q_send(owner, rid, src=SRC)
 
 

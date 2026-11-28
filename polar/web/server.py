@@ -73,6 +73,10 @@ def ui_port() -> Optional[int]:
     return port if 0 < port < 65536 else None
 
 
+def _too_long(value: str) -> bool:
+    return len(value.strip()) > db.MAX_REPLY_CHARS  # the core counts the text after strip
+
+
 def build_payload(data: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Check what the page sent. Return (payload for webapi.perform, None) or (None, error text)."""
     if not isinstance(data, dict):
@@ -94,22 +98,30 @@ def build_payload(data: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         if (not isinstance(ans, dict) or len(ans) > 20
                 or any(not isinstance(k, str) or not isinstance(v, str) or not v.strip() for k, v in ans.items())):
             return None, t("v_answers")
+        if any(_too_long(v) for v in ans.values()):
+            return None, t("v_too_long", n=db.MAX_REPLY_CHARS)
         p["answers"] = dict(ans)
         note = data.get("note")
         if note is not None:
-            if not isinstance(note, str) or len(note) > db.MAX_REPLY_CHARS:
-                return None, t("v_note")
+            if not isinstance(note, str):
+                return None, t("v_answers")
+            if _too_long(note):
+                return None, t("v_too_long", n=db.MAX_REPLY_CHARS)
             if note.strip():
                 p["note"] = note.strip()
     elif action == "send":
         if data.get("text") is not None:
             if not isinstance(data["text"], str) or not data["text"].strip():
                 return None, t("v_text")
+            if _too_long(data["text"]):
+                return None, t("v_too_long", n=db.MAX_REPLY_CHARS)
             p["text"] = data["text"]
     elif action == "revise":
         text = data.get("text")
         if not isinstance(text, str) or not text.strip():
             return None, t("v_revise")
+        if _too_long(text):
+            return None, t("v_too_long", n=db.MAX_REPLY_CHARS)
         p["text"] = text.strip()
     elif action == "next":
         ix = data.get("indexes")
@@ -129,7 +141,13 @@ def ui_error(code: int, out: Dict[str, Any]) -> str:
         return t("err_changed", status=t("st_" + st) if has("st_" + st) else st or "?")
     if code == 502:
         return t("err_send")
-    if code == 400:
+    if code == 400:  # a specific UI text when the core said why (its own texts are Spanish)
+        said = str(out.get("error") or "")
+        for start, key in (("Máximo", "v_too_long"), ("Faltan respuestas", "v_answers"), ("Faltan las respuestas", "v_answers"),
+                           ("Respuesta vacía", "v_answers"), ("Opción no válida", "v_option"),
+                           ("Seguimiento no válido", "v_next"), ("Falta el texto", "v_text")):
+            if said.startswith(start):
+                return t(key, n=db.MAX_REPLY_CHARS) if key == "v_too_long" else t(key)
         return t("err_bad")
     return t("err_internal")
 
