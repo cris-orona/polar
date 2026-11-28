@@ -225,6 +225,8 @@ def serve() -> int:
     threading.Thread(target=loop, daemon=True).start()
     from polar import webapi
     webapi.start(polar)  # a busy port or a bad setting only turns it off
+    from polar.web import server as web_ui
+    web_ui.start(polar)  # POLAR_UI_PORT unset or 0: the web UI stays off
     log.info("polar serving for owner %s", polar.owner_id)
     SocketModeHandler(polar.app, get_token("app")).start()  # type: ignore[attr-defined]
     return 0
