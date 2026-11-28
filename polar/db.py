@@ -584,9 +584,16 @@ def set_result(conn: Any, rid: str, result: Dict[str, Any]) -> bool:
     return cur.rowcount == 1
 
 
-def set_result_any(conn: Any, rid: str, result: Dict[str, Any]) -> None:
-    """Replace the result of a card in any status (the owner's late notes are added to a closed card)."""
-    conn.execute("UPDATE requests SET result_json=? WHERE id=?", (json.dumps(result, ensure_ascii=False), rid))
+def add_owner_note(conn: Any, rid: str, text: str) -> None:
+    """Append a late note of the owner to the result of a card in any status. Read the row again just before the
+    write, so a result that changed meanwhile is kept."""
+    row = conn.execute("SELECT result_json FROM requests WHERE id=?", (rid,)).fetchone()
+    try:
+        res = json.loads(row["result_json"]) if row and row["result_json"] else {}
+    except ValueError:
+        res = {}
+    res.setdefault("owner_notes", []).append({"at": now_iso(), "text": text})
+    conn.execute("UPDATE requests SET result_json=? WHERE id=?", (json.dumps(res, ensure_ascii=False), rid))
 
 
 def set_final_text(conn: sqlite3.Connection, rid: str, text: str) -> bool:

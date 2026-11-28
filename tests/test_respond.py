@@ -207,3 +207,49 @@ def test_closed_card_bus_failure(web, polar, conn, monkeypatch, tmp_path):
     polar.on_choose(polar.owner_id, rid, "a")
     code, out = act(web, rid, "respond", note="x")
     assert code == 502 and "owner_notes" not in db.get(conn, rid)["result"]
+
+
+def _moved_by_someone(polar, monkeypatch):
+    def fake(owner, rid, key, **kw):
+        db.transition(polar.conn, rid, "shown", "chosen", result_json=json.dumps({"option": "b", "src": "slack"}))
+    monkeypatch.setattr(polar, "on_choose", fake)
+
+
+def test_race_with_note_falls_back_to_delivery(web, polar, conn, fake_bus, monkeypatch):
+    rid = decision(conn, SID + " pane")
+    shown(polar, rid)
+    _moved_by_someone(polar, monkeypatch)
+    assert act(web, rid, "respond", option="a", note="ojo") == (200, {"ok": True, "status": "Entregado al agente."})
+    assert json.loads(fake_bus.read_text())["in"].endswith("Nota: ojo")
+    assert db.get(conn, rid)["result"]["option"] == "b"
+    assert db.get(conn, rid)["result"]["owner_notes"][0]["text"] == "ojo"
+
+
+def test_race_without_note_is_409(web, polar, conn, fake_bus, monkeypatch):
+    rid = decision(conn, SID)
+    shown(polar, rid)
+    _moved_by_someone(polar, monkeypatch)
+    code, out = act(web, rid, "respond", option="a")
+    assert code == 409 and out["error"].startswith("La tarjeta ya cambió")
+    assert not fake_bus.exists()
+
+
+def test_ref_is_stable_per_note_and_place_is_checked(web, polar, conn, fake_bus):
+    import hashlib
+    rid = decision(conn, SID + " bad;pane")
+    shown(polar, rid)
+    polar.on_choose(polar.owner_id, rid, "a")
+    assert act(web, rid, "respond", note="igual")[0] == 200
+    argv = json.loads(fake_bus.read_text())["argv"]
+    assert argv[argv.index("--ref") + 1] == "polar:%s:%s" % (rid, hashlib.sha1(b"igual").hexdigest()[:10])
+    assert "--place" not in argv
+
+
+def test_owner_note_keeps_a_result_that_changed(conn):
+    rid = decision(conn)
+    conn.execute("UPDATE requests SET result_json=? WHERE id=?", (json.dumps({"option": "a"}), rid))
+    db.add_owner_note(conn, rid, "uno")
+    conn.execute("UPDATE requests SET result_json=json_set(result_json,'$.x',1) WHERE id=?", (rid,))
+    db.add_owner_note(conn, rid, "dos")
+    res = db.get(conn, rid)["result"]
+    assert res["option"] == "a" and res["x"] == 1 and [n["text"] for n in res["owner_notes"]] == ["uno", "dos"]

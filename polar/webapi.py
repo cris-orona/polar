@@ -4,6 +4,7 @@ Each action calls the same `Polar.on_*` method as the matching Slack button, as 
 It binds 127.0.0.1 only and needs `Authorization: Bearer <token>` (the token is in data/web-token)."""
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import logging
@@ -26,6 +27,7 @@ log = logging.getLogger("polar")
 DEFAULT_PORT = 8791
 MAX_BODY = 64 * 1024
 SRC = "web"
+PLACE = re.compile(r"[\w.-]+")
 SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
@@ -144,6 +146,15 @@ def perform(polar: Polar, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
                 raise ActionError("La caja Responder está apagada.", 403)
             if req["status"] not in ("shown", "noted"):
                 return _respond_closed(polar, req, body)
+            try:
+                _respond(polar, req, body)
+            except _Moved as moved:
+                # Someone else moved the card first: the note still goes to the agent.
+                if not moved.note:
+                    raise ActionError("La tarjeta ya cambió (estado: %s)." % _status(polar, rid), 409)
+                return _respond_closed(polar, db.get(polar.conn, rid), dict(body, option=None, answers=None,
+                                                                            indexes=None))
+            return 200, {"ok": True, "status": _status(polar, rid)}
         except ActionError as exc:
             out = {"ok": False, "error": exc.error}
             if exc.code in (403, 409):
@@ -260,13 +271,18 @@ def _run(polar: Polar, req: Dict[str, Any], action: str, body: Dict[str, Any]) -
         if any(not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < len(steps) for i in idxs):
             raise ActionError("Seguimiento no válido.", 400)
         polar.on_next(owner, rid, src=SRC, indexes=idxs)
-    elif action == "respond":
-        _respond(polar, req, body)
     else:
         raise ActionError("Acción desconocida.", 400)
     # The core refuses in silence. A status that did not change means this call did not act.
     if _status(polar, rid) == req["status"]:
         raise ActionError("La tarjeta ya cambió (estado: %s)." % _status(polar, rid), 409)
+
+
+class _Moved(Exception):
+    """The card left its open status, but not by this call."""
+    def __init__(self, note: str) -> None:
+        super().__init__("moved")
+        self.note = note
 
 
 def _clip(text: str, n: int = 80) -> str:
@@ -319,12 +335,12 @@ def _respond(polar: Polar, req: Dict[str, Any], body: Dict[str, Any]) -> None:
             summary = "eligió «%s»" % option
         else:
             raise ActionError("Opción no válida.", 400)
-        polar.on_choose(owner, rid, option, src=SRC, and_continue=bool(body.get("and_continue")),
-                        respond=_stored(summary, note))
+        stored = _stored(summary, note)
+        polar.on_choose(owner, rid, option, src=SRC, and_continue=bool(body.get("and_continue")), respond=stored)
     elif answers is not None:
         if kind != "questions":
             raise ActionError("Esta tarjeta no tiene preguntas.", 400)
-        _answer(polar, req, body, respond=True)
+        stored = _answer(polar, req, body, respond=True)
     elif indexes is not None:
         if kind != "report":
             raise ActionError("Esta tarjeta no tiene seguimientos.", 400)
@@ -334,12 +350,17 @@ def _respond(polar: Polar, req: Dict[str, Any], body: Dict[str, Any]) -> None:
                 or any(not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < len(steps) for i in indexes)):
             raise ActionError("Seguimiento no válido.", 400)
         summary = "eligió " + ", ".join("%d) %s" % (i + 1, _clip(steps[i])) for i in sorted(indexes))
-        polar.on_next(owner, rid, src=SRC, indexes=indexes, respond=_stored(summary, note))
+        stored = _stored(summary, note)
+        polar.on_next(owner, rid, src=SRC, indexes=indexes, respond=stored)
     else:
-        polar.on_revise_submit(owner, blocks.text_view(note, rid), src=SRC,
-                               respond=_stored("pidió cambios", note))
-    if _status(polar, rid) == req["status"]:
-        raise ActionError("La tarjeta ya cambió (estado: %s)." % _status(polar, rid), 409)
+        stored = _stored("pidió cambios", note)
+        polar.on_revise_submit(owner, blocks.text_view(note, rid), src=SRC, respond=stored)
+    after = db.get(polar.conn, rid) or {}
+    if after.get("status") == req["status"]:
+        raise ActionError("La tarjeta ya cambió (estado: %s)." % after.get("status"), 409)
+    got = after.get("result") or {}
+    if got.get("respond_summary") != stored.get("respond_summary") or got.get("respond_note") != stored.get("respond_note"):
+        raise _Moved(note)
 
 
 def _bus_bin() -> str:
@@ -377,23 +398,21 @@ def _respond_closed(polar: Polar, req: Dict[str, Any], body: Dict[str, Any]) -> 
     text = ("Polar (respuesta): the owner wrote more about your card %s «%s». Nota: %s"
             % (rid, req["title"], note))
     cmd = [sys.executable, _bus_bin(), "deliver", sid, "--text-file", "-", "--from", "polar",
-           "--ref", "polar:%s:%s" % (rid, uuid.uuid4().hex[:8])]
-    if place:
+           "--ref", "polar:%s:%s" % (rid, hashlib.sha1(note.encode("utf-8")).hexdigest()[:10])]
+    if place and PLACE.fullmatch(place):
         cmd += ["--place", place]
     try:
-        done = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=120).returncode == 0
+        done = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=300).returncode == 0
     except (OSError, subprocess.SubprocessError):
         done = False
     if not done:
         log.error("respond: agent-bus did not take the note for %s", rid)
         return 502, {"ok": False, "status": req["status"], "error": "No se pudo avisar al agente."}
-    res = dict(req.get("result") or {})
-    res.setdefault("owner_notes", []).append({"at": db.now_iso(), "text": note})
-    db.set_result_any(polar.conn, rid, res)
+    db.add_owner_note(polar.conn, rid, note)
     return 200, {"ok": True, "status": "Entregado al agente."}
 
 
-def _answer(polar: Polar, req: Dict[str, Any], body: Dict[str, Any], respond: bool = False) -> None:
+def _answer(polar: Polar, req: Dict[str, Any], body: Dict[str, Any], respond: bool = False) -> Optional[Dict[str, Any]]:
     _need(req, ("questions",), ("shown",))
     rid, owner = req["id"], polar.owner_id
     given = body.get("answers")
@@ -439,6 +458,7 @@ def _answer(polar: Polar, req: Dict[str, Any], body: Dict[str, Any], respond: bo
             "%d) %s" % (i, _clip(blocks.answer_text(shown[q["key"]])))
             for i, q in enumerate(req["options"], 1)), (note or "").strip())
     polar.on_q_send(owner, rid, src=SRC, respond=stored)
+    return stored
 
 
 LENGTH_RE = re.compile(r"[0-9]{1,7}")
