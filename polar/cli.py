@@ -253,6 +253,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("expire")
     sub.add_parser("serve")
+    demo = sub.add_parser("demo", help="the web UI on sample data: no Slack, nothing is sent")
+    demo.add_argument("--port", type=int, default=8792)
+    demo.add_argument("--lang", choices=["en", "es"], default=None)
     sub.add_parser("doctor")
     return p
 
@@ -798,6 +801,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             ids = db.expire_due(db.connect())
             _out({"expired": ids})
             return 0
+        if args.cmd == "demo":
+            from polar.web import demo as web_demo
+            return web_demo.run(args.port, args.lang)
         if args.cmd == "serve":
             from polar.app import serve
             return serve()
