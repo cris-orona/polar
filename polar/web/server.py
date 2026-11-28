@@ -11,6 +11,7 @@ import logging
 import mimetypes
 import os
 import threading
+from http import HTTPStatus
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -136,11 +137,27 @@ class UIServer(ThreadingHTTPServer):
 class Handler(webapi.CloseOnError):
     """Every answer goes through `send_response`: an error answer (>= 400) closes the connection (see CloseOnError)."""
     server_version = "polar-ui"
+    sys_version = ""  # no Python version in the Server header
     protocol_version = "HTTP/1.1"
+    timeout = 30  # seconds: a slow or stalled client cannot hold a thread for ever
     server: UIServer
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        pass
+        pass  # also silences «Request timed out» of an idle keep-alive connection
+
+    def version_string(self) -> str:
+        return self.server_version
+
+    def send_error(self, code: int, message: Optional[str] = None, explain: Optional[str] = None) -> None:
+        """Errors of the HTTP layer (unknown method, bad request line, long header): a short plain answer with the
+        same security headers as a page. `_send` passes `send_response`, so the connection closes."""
+        try:
+            phrase = HTTPStatus(code).phrase
+        except ValueError:
+            phrase = "Error"
+        if not str(getattr(self, "request_version", "")).startswith("HTTP/1."):
+            self.request_version = "HTTP/1.0"  # a bad request line: still send a status line and the headers
+        self._send(code, "%d %s\n" % (code, phrase), "text/plain; charset=utf-8")
 
     # -- replies -------------------------------------------------------------------------------------------------------
     def _send(self, code: int, body: Any, ctype: str = "text/html; charset=utf-8",
@@ -158,7 +175,7 @@ class Handler(webapi.CloseOnError):
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
-        if self.command != "HEAD":
+        if getattr(self, "command", None) != "HEAD":
             self.wfile.write(data)
 
     def _json(self, code: int, obj: Dict[str, Any]) -> None:

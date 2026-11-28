@@ -162,6 +162,36 @@ def test_get_with_body_closes_the_connection(ui):
     assert out.count(b"HTTP/1.1 ") == 1 and closed
 
 
+@pytest.mark.parametrize("req", [b"PUT / HTTP/1.1\r\nHost: @@\r\nContent-Length: 0\r\n\r\n",
+                                 b"BREW\r\n\r\n", b"GET / HTTP/9.9\r\nHost: @@\r\n\r\n"])
+def test_http_errors_are_plain_and_safe(ui, req):
+    out, closed = raw(ui.port, req.replace(b"@@", b"127.0.0.1:%d" % ui.port))
+    head, _, body = out.partition(b"\r\n\r\n")
+    assert out.count(b"HTTP/1.1 ") == 1 and closed
+    assert b"Server: polar-ui\r\n" in head and b"Python" not in out
+    assert b"Content-Security-Policy: default-src 'none'" in head and b"X-Content-Type-Options: nosniff" in head
+    assert b"Connection: close" in head and b"<" not in body and len(body) < 60
+
+
+def test_idle_keepalive_times_out_quietly(ui, monkeypatch, capsys):
+    monkeypatch.setattr(server.Handler, "timeout", 0.3)
+    s = socket.create_connection(("127.0.0.1", ui.port), timeout=3)
+    s.sendall(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n" % ui.port)
+    out = b""
+    while True:  # the server closes the idle connection after the timeout
+        got = s.recv(65536)
+        if not got:
+            break
+        out += got
+    s.close()
+    assert out.startswith(b"HTTP/1.1 200") and out.count(b"HTTP/1.1 ") == 1
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_handler_timeout_is_set():
+    assert server.Handler.timeout == 30
+
+
 def test_body_limit_and_bad_json(ui):
     assert post(ui, b"x" * (server.MAX_BODY + 1))[0] == 413
     assert post(ui, b"{not json")[0] == 400
