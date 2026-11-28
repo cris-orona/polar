@@ -11,7 +11,7 @@ import logging
 import mimetypes
 import os
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
@@ -133,7 +133,8 @@ class UIServer(ThreadingHTTPServer):
         return "http://127.0.0.1:%d/" % self.port
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(webapi.CloseOnError):
+    """Every answer goes through `send_response`: an error answer (>= 400) closes the connection (see CloseOnError)."""
     server_version = "polar-ui"
     protocol_version = "HTTP/1.1"
     server: UIServer
@@ -189,6 +190,8 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self) -> None:
+        if self.headers.get("Content-Length") not in (None, "0") or self.headers.get("Transfer-Encoding"):
+            self.close_connection = True  # a GET body is never read: do not parse it as the next request
         if not self._guard():
             return
         try:
@@ -280,6 +283,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if urlparse(self.path).path != "/api/act":
             return self._json(404, {"ok": False, "error": t("not_found")})
+        if self.headers.get("Transfer-Encoding"):  # only a plain Content-Length body is read
+            return self._json(411, {"ok": False, "error": t("err_bad")})
         if (self.headers.get("Origin") or "") not in self.server.origins:
             return self._json(403, {"ok": False, "error": t("err_origin")})
         got = self.headers.get("X-CSRF-Token") or ""
@@ -290,7 +295,6 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self._json(411, {"ok": False, "error": t("err_bad")})
         if length < 0 or length > MAX_BODY:
-            self.close_connection = True
             return self._json(413, {"ok": False, "error": t("err_too_big")})
         try:
             data = json.loads(self.rfile.read(length).decode("utf-8"))

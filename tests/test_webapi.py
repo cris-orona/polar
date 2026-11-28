@@ -350,3 +350,31 @@ def test_report_next_indexes(web, polar, conn):
     assert act(web, rid, "next", indexes=[2, 0]) == (200, {"ok": True, "status": "revise"})
     res = db.get(conn, rid)["result"]
     assert res["instructions"] == "1) A 2) C" and res["indexes"] == [0, 2] and res["steps"] == ["A", "C"]
+
+
+def _raw(port, data):
+    """Send raw bytes; return (everything the server wrote, True when the server closed the socket)."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=2)
+    s.sendall(data)
+    out, closed = b"", False
+    while True:
+        try:
+            got = s.recv(65536)
+        except socket.timeout:
+            break
+        if not got:
+            closed = True
+            break
+        out += got
+    s.close()
+    return out, closed
+
+
+def test_error_response_closes_the_connection(web):
+    port = web.server_address[1]
+    inner = b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nAuthorization: Bearer %s\r\n\r\n" % (port, TOKEN.encode())
+    req = (b"POST /act HTTP/1.1\r\nHost: evil.example\r\nContent-Type: application/json\r\n"
+           b"Content-Length: %d\r\n\r\n" % len(inner)) + inner
+    out, closed = _raw(port, req)
+    assert out.count(b"HTTP/1.1 ") == 1 and out.startswith(b"HTTP/1.1 403") and closed
+    assert b"Connection: close" in out

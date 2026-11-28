@@ -2,6 +2,7 @@
 import http.client
 import json
 import re
+import socket
 import threading
 from pathlib import Path
 
@@ -120,6 +121,45 @@ def test_csrf_secret_file_is_private(ui, data):
     f = data / server.SECRET_FILE
     assert f.exists() and (f.stat().st_mode & 0o777) == 0o600
     assert ui.csrf() in call(ui, "GET", "/")[1].decode()
+
+
+def raw(port, data, timeout=2.0):
+    """Send raw bytes; return (everything the server wrote, True when the server closed the socket)."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    s.sendall(data)
+    out, closed = b"", False
+    while True:
+        try:
+            got = s.recv(65536)
+        except socket.timeout:
+            break
+        if not got:
+            closed = True
+            break
+        out += got
+    s.close()
+    return out, closed
+
+
+@pytest.mark.parametrize("why", ["host", "origin", "csrf", "path"])
+def test_rejected_post_closes_the_connection(ui, why):
+    inner = b"GET / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n" % ui.port
+    host = b"evil.example" if why == "host" else b"127.0.0.1:%d" % ui.port
+    origin = b"http://evil.example" if why == "origin" else b"http://127.0.0.1:%d" % ui.port
+    csrf = b"" if why == "csrf" else ui.csrf().encode()
+    path = b"/nope" if why == "path" else b"/api/act"
+    req = (b"POST %s HTTP/1.1\r\nHost: %s\r\nOrigin: %s\r\nX-CSRF-Token: %s\r\nContent-Type: application/json\r\n"
+           b"Content-Length: %d\r\n\r\n" % (path, host, origin, csrf, len(inner))) + inner
+    out, closed = raw(ui.port, req)
+    assert out.count(b"HTTP/1.1 ") == 1, out[:400]
+    assert closed and b"Connection: close" in out and b"<article" not in out
+
+
+def test_get_with_body_closes_the_connection(ui):
+    inner = b"GET /history HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n" % ui.port
+    req = b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Length: %d\r\n\r\n" % (ui.port, len(inner)) + inner
+    out, closed = raw(ui.port, req)
+    assert out.count(b"HTTP/1.1 ") == 1 and closed
 
 
 def test_body_limit_and_bad_json(ui):
