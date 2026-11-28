@@ -44,6 +44,11 @@ def register(app: Any, polar: Polar) -> None:
         ack()
         polar.on_revise_click(uid(body), rid(body), body["trigger_id"])
 
+    @app.action("polar_nextstep")
+    def _nextstep(ack, body):
+        ack()
+        polar.on_next_step(uid(body), rid(body))
+
     @app.action("polar_reopen")
     def _reopen(ack, body):
         ack()

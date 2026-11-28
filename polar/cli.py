@@ -153,6 +153,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="store the report with no Slack DM: for a notice that needs no action from the owner. "
                          "It shows as a posted report in Mando and on the web page. Not with --file (no thread)")
 
+    rp.add_argument("--card", action="store_true",
+                    help="keep the report as a card even when it has no --next, --revisar or --resume")
     rd_ = sub.add_parser("revise-digest", help="the owner's corrections of the last days; --start hands them to a task")
     rd_.add_argument("--days", type=int, default=7)
     rd_.add_argument("--start", action="store_true", help="start one owner task that proposes rules from them")
@@ -585,7 +587,9 @@ def cmd_report(args: argparse.Namespace) -> int:
             text = fh.read().strip()
     if args.silent and args.file:
         raise ValueError("--silent sends no DM, so there is no thread for --file; drop one of them")
-    db.check_report_evidence(text, args.requester, args.silent)
+    db.check_report_evidence(text, args.requester, args.silent)  # the evidence rule uses the flag the caller gave
+    if not args.silent and not args.card and db.asks_nothing(args.next, args.revisar, args.resume, args.file):
+        args.silent = True  # nothing for the owner to do: stored for the web UI reports list, no card, no DM, no push
     files = []
     for f in args.file:
         path = os.path.abspath(os.path.expanduser(f))

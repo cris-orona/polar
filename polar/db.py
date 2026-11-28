@@ -328,6 +328,12 @@ def evidence_missing(text: str) -> bool:
     return True
 
 
+def asks_nothing(nxt: Any, revisar: Any, resume: Any, files: Any) -> bool:
+    """True when a report gives the owner nothing to press: no follow-up, no scheduled check, no resume, no file
+    (a file needs a DM thread). Such a report is stored as silent: the web UI reports list lists it, no card waits."""
+    return not (nxt or revisar or resume or files)
+
+
 def check_report_evidence(text: str, requester: Optional[str], silent: bool) -> None:
     """Refuse a session report with no «what I checked» section. Scripts, the release desk and silent notices are
     exempt: they report machine facts, not work that a person must trust."""

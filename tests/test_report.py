@@ -61,7 +61,7 @@ def test_render_without_resume(conn):
     assert any("Sesión" in e["text"] for b in bl if b["type"] == "context" for e in b["elements"])
     els = actions(req)
     ids = [e["action_id"] for e in els]
-    assert ids == ["polar_link:0", "polar_revise"]
+    assert ids == ["polar_link:0", "polar_nextstep", "polar_revise"]
     assert els[0]["url"] == "https://slack.com"
     assert "polar_choose:resume" not in ids
 
@@ -112,7 +112,7 @@ def test_noted_after_delivery(conn, polar, bot):
     sent = bot.of("chat_postMessage")[-1]["blocks"]
     assert "Visto" not in json.dumps(sent, ensure_ascii=False)
     ids = [e["action_id"] for b in sent if b["type"] == "actions" for e in b["elements"]]
-    assert ids == ["polar_choose:resume", "polar_revise"]
+    assert ids == ["polar_choose:resume", "polar_nextstep", "polar_revise"]
 
 
 def test_refresh_noted_keeps_buttons(conn, polar, bot):
@@ -258,7 +258,7 @@ def test_next_buttons_render(conn):
     req = db.get(conn, make(conn, resume=SID, links=["PR=https://a.b"], next=["Sigue con X", "y" * 70]))
     els = actions(req)
     ids = [e["action_id"] for e in els]
-    assert ids == ["polar_choose:resume", "polar_link:0", "polar_next_go", "polar_revise"]
+    assert ids == ["polar_choose:resume", "polar_link:0", "polar_next_go", "polar_nextstep", "polar_revise"]
     assert els[2]["text"]["text"] == "▶️ Empezar marcados"
     sel = [b for b in blocks.request_blocks(req) if b.get("block_id") == "polar_nextsel:" + req["id"]][0]
     opts = sel["elements"][0]["options"]
@@ -268,7 +268,7 @@ def test_next_buttons_render(conn):
 def test_one_followup_keeps_button_three_get_checkboxes(conn):
     one = db.get(conn, make(conn, next=["Solo uno"]))
     els = actions(one)
-    assert [e["action_id"] for e in els] == ["polar_next:0", "polar_revise"]
+    assert [e["action_id"] for e in els] == ["polar_next:0", "polar_nextstep", "polar_revise"]
     assert not any(b.get("block_id", "").startswith("polar_nextsel") for b in blocks.request_blocks(one))
     three = db.get(conn, make(conn, next=["a", "b", "c" * 70]))
     bl = blocks.request_blocks(three)
@@ -381,3 +381,23 @@ def test_next_go_stale_and_toggle(polar, conn, bot):
     from polar import app as app_mod
     src = open(app_mod.__file__).read()
     assert re.search(r'def _next_check\(ack\):\n\s+ack\(\)', src)
+
+
+def test_next_step_button_is_like_revise_with_fixed_text(polar, bot, conn):
+    from polar import blocks
+    rid = db.create_request(conn, "report", "T", "", "s1", draft_text="hecho", report={"next": ["A", "B"]})
+    db.transition(conn, rid, "pending", "noted")
+    polar.on_next_step("U9", rid)  # not the owner
+    assert db.get(conn, rid)["status"] == "noted"
+    polar.on_next_step(OWNER, rid)
+    req = db.get(conn, rid)
+    assert req["status"] == "revise" and req["result"]["instructions"] == blocks.NEXT_STEP_TEXT
+    assert "via" not in req["result"]  # same result a «Pedir cambios» with that text stores
+    polar.on_next_step(OWNER, rid)  # a second press does nothing
+    assert db.get(conn, rid)["status"] == "revise"
+
+
+def test_next_step_only_on_a_report(polar, conn):
+    rid = db.create_request(conn, "decision", "T", "", "s1", options=[{"key": "a", "label": "A"}, {"key": "b", "label": "B"}])
+    polar.on_next_step(OWNER, rid)
+    assert db.get(conn, rid)["status"] == "pending"

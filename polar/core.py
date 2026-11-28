@@ -885,6 +885,17 @@ class Polar:
         self._to_revise(view["private_metadata"], text, src=src, extra=respond)
         return None
 
+    def on_next_step(self, user_id: str, rid: str, src: Optional[str] = None) -> None:
+        """«Siguiente paso» on a report: the same as «Pedir cambios» with a fixed text, through the same path."""
+        if not self.is_owner(user_id):
+            return
+        req = db.get(self.conn, rid)
+        if not req or req["kind"] != "report":
+            return
+        if req["status"] not in ("shown", "noted"):
+            return self._stale(rid, src)
+        self._to_revise(rid, blocks.NEXT_STEP_TEXT, src=src)
+
     @staticmethod
     def _next_indexes(index: Any, indexes: Any, count: int) -> Optional[List[int]]:
         """The follow-up numbers of one press, ascending, or None when the input is bad."""

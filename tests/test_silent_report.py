@@ -86,3 +86,36 @@ def test_next_on_a_silent_report_with_no_reader_starts_a_task(polar, bot, conn):
     posts = bot.of("chat_postMessage")
     assert len(posts) == 1 and "thread_ts" not in posts[0]  # the notice is the thread root
     assert task["thread_ts"] == "100.1"
+
+
+def _run(tmp_path, *extra):
+    f = tmp_path / "r.md"
+    f.write_text("hola")
+    assert cli.main(["report", "--title", "T", "--text-file", str(f), *extra]) == 0
+
+
+def test_report_that_asks_nothing_is_stored_silent(capsys, tmp_path):
+    _run(tmp_path)
+    req = db.get(db.connect(), json.loads(capsys.readouterr().out)["id"])
+    assert req["silent"] == 1 and req["status"] == "noted" and req["dm_done"] == 1
+
+
+def test_report_with_an_ask_stays_a_card(capsys, tmp_path):
+    for extra in (["--next", "Sigue"], ["--resume", SID]):
+        _run(tmp_path, *extra)
+        req = db.get(db.connect(), json.loads(capsys.readouterr().out)["id"])
+        assert req["silent"] == 0 and req["status"] == "pending"
+
+
+def test_card_flag_keeps_the_card(capsys, tmp_path):
+    _run(tmp_path, "--card")
+    req = db.get(db.connect(), json.loads(capsys.readouterr().out)["id"])
+    assert req["silent"] == 0 and req["status"] == "pending"
+
+
+def test_report_with_a_file_stays_a_card(capsys, tmp_path):
+    att = tmp_path / "a.pdf"
+    att.write_text("x")
+    _run(tmp_path, "--file", str(att))
+    req = db.get(db.connect(), json.loads(capsys.readouterr().out)["id"])
+    assert req["silent"] == 0

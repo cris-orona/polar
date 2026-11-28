@@ -48,6 +48,12 @@ characters under it. Polar refuses it otherwise (exit 1, the reason in `error`).
 (`POLAR_WEB_PORT`): the session groups them and proposes 1–3 rules in one decision card. It starts nothing with fewer
 than 2 corrections. Run it from your own scheduler, for example one weekly job.
 
+### Next step and silent reports
+
+A report card has a «⏭️ Siguiente paso» button. One tap is the same as «Pedir cambios» with a fixed text that asks
+the session to do the next step it proposed. A report with no `--next`, `--revisar`, `--resume` and no `--file`
+asks the owner for nothing, so Polar stores it as a `--silent` report (no card, no DM). `--card` keeps it as a card.
+
 ### Pedir cambios
 
 Reply, decision, questions and report cards have a «🔁 Pedir cambios» button. The owner types what to change.

@@ -256,6 +256,15 @@ def revise_button(rid: str) -> Dict[str, Any]:
             "text": {"type": "plain_text", "text": "🔁 Pedir cambios"}}
 
 
+NEXT_STEP_TEXT = "Haz el siguiente paso que propusiste, dentro de lo que pedí"  # same text as the web UI button
+
+
+def next_step_button(rid: str) -> Dict[str, Any]:
+    """One tap = «Pedir cambios» with NEXT_STEP_TEXT (95% of the owner's change texts said only this)."""
+    return {"type": "button", "action_id": "polar_nextstep", "value": rid,
+            "text": {"type": "plain_text", "text": "⏭️ Siguiente paso"}}
+
+
 def report_web_url(rid: str) -> Optional[str]:
     """The page of a report on the web front end, when POLAR_WEB_URL is set."""
     base = (os.environ.get("POLAR_WEB_URL") or "").strip().rstrip("/")
@@ -282,8 +291,9 @@ def report_buttons(req: Dict[str, Any]) -> List[Dict[str, Any]]:
     elif steps:  # 2 or 3: the owner checks some in `next_select` and presses this button
         els.append({"type": "button", "style": "primary", "action_id": "polar_next_go", "value": rid,
                     "text": {"type": "plain_text", "text": "▶️ Empezar marcados"}})
+    els.append(next_step_button(rid))
     els.append(revise_button(rid))
-    return els  # at most 11 elements; Slack allows 25
+    return els  # at most 12 elements; Slack allows 25
 
 
 def followup_blocks(req: Dict[str, Any]) -> List[Dict[str, Any]]:
