@@ -34,6 +34,50 @@ SERVER_LABEL = SERVER_NAME or "el servidor"
 SERVER_HOST = "".join(c for c in (SERVER_NAME or "server") if c.isalnum() or c in "-_.") or "server"
 # launchd label of the coord-tick agent: the watchdog text tells the owner how to kick it.
 COORD_TICK_LABEL = os.environ.get("POLAR_COORD_TICK_LABEL") or "coord-tick"
+# Folder trust. Each root is a folder in ~ (POLAR_TRUST_ROOTS, a comma list; default the two area folders). Never a
+# folder in POLAR_TRUST_DENY (default `oss`, where code from others is cloned), never ~ itself, never "/".
+# Keep the same list in any other tool that pre-accepts folder trust.
+TRUST_ROOTS = tuple(x.strip() for x in (os.environ.get("POLAR_TRUST_ROOTS") or "work,personal").split(",") if x.strip())
+TRUST_DENY = tuple(x.strip() for x in (os.environ.get("POLAR_TRUST_DENY") or "oss").split(",") if x.strip())
+
+
+def in_trust_roots(path: Path, home: Path) -> bool:
+    real, rhome = Path(os.path.realpath(path)), Path(os.path.realpath(home))
+    if real in (rhome, Path("/")):
+        return False
+    for n in TRUST_DENY:
+        d = Path(os.path.realpath(rhome / n))
+        if real == d or d in real.parents:
+            return False
+    return any(real == r or r in real.parents for r in (Path(os.path.realpath(rhome / n)) for n in TRUST_ROOTS))
+
+
+def trust_keys(path: Path, home: Path) -> List[str]:
+    """The ~/.claude.json `projects` keys to trust for a start in `path`: the folder, its Git root and, for a git
+    worktree, the main checkout root (Claude Code may key by either). A key outside the trusted roots is dropped."""
+    real = os.path.realpath(path)
+    keys = [str(path), real]
+
+    def git(*a: str) -> str:
+        r = subprocess.run(["git", "-C", real, *a], capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    try:
+        top, common = git("rev-parse", "--show-toplevel"), git("rev-parse", "--git-common-dir")
+        if top:
+            keys.append(os.path.realpath(top))
+        if common:
+            common = os.path.realpath(os.path.join(real, common))
+            if os.path.basename(common) == ".git":
+                keys.append(os.path.dirname(common))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    out: List[str] = []
+    for k in keys:
+        if k not in out and (k == str(path) or in_trust_roots(Path(k), home)):
+            out.append(k)
+    return out
+
+
 # The folder of a new session, by the kind of work. `work` runs in ~/work, where a shared team memory may read each
 # prompt. Any other work (own tools, private life) runs in ~/personal: no git repo and not under ~/work, so that
 # memory reads nothing there. One row per area; the env override is for tests and the default is the folder in
@@ -298,7 +342,10 @@ class Tasks:
 
     def work_dir(self, area: Optional[str] = None) -> Path:
         env, name = AREAS.get(area or DEFAULT_AREA) or AREAS[DEFAULT_AREA]
-        return Path(os.environ.get(env) or Path.home() / name).expanduser()
+        work = Path(os.environ.get(env) or Path.home() / name).expanduser()
+        if os.path.realpath(work) in (os.path.realpath(Path.home()), "/"):  # ~ and "/" are never a start folder
+            return Path.home() / "work"
+        return work
 
     def area_of_session(self, session_id: str) -> str:
         """The area of the Polar task that started `session_id` (DEFAULT_AREA when Polar did not start it)."""
@@ -1098,15 +1145,25 @@ class Tasks:
         return len(held)
 
     def ensure_trust(self, work: Path) -> None:
-        """Pre-accept Claude Code's folder trust for the work folder (how Claude Code stores it)."""
+        """Pre-accept Claude Code's folder trust for the work folder (how Claude Code stores it).
+        Only a folder inside a trusted root (POLAR_TRUST_ROOTS), never POLAR_TRUST_DENY, ~ or "/"; the keys are the folder, its Git root and the main checkout root."""
         path = Path(os.environ.get("POLAR_CLAUDE_JSON") or Path.home() / ".claude.json")
         try:
-            data = json.loads(path.read_text()) if path.exists() else {}
-            proj = data.setdefault("projects", {}).setdefault(str(work), {})
-            if proj.get("hasTrustDialogAccepted") and proj.get("hasCompletedProjectOnboarding"):
+            home = Path.home()
+            if not in_trust_roots(work, home):
                 return
-            proj["hasTrustDialogAccepted"] = True
-            proj["hasCompletedProjectOnboarding"] = True
+            data = json.loads(path.read_text()) if path.exists() else {}
+            projects = data.setdefault("projects", {})
+            changed = False
+            for key in trust_keys(work, home):
+                proj = projects.setdefault(key, {})
+                if proj.get("hasTrustDialogAccepted") and proj.get("hasCompletedProjectOnboarding"):
+                    continue
+                proj["hasTrustDialogAccepted"] = True
+                proj["hasCompletedProjectOnboarding"] = True
+                changed = True
+            if not changed:
+                return
             tmp = path.with_name(path.name + ".polar-tmp")
             tmp.write_text(json.dumps(data, indent=2))
             os.replace(tmp, path)

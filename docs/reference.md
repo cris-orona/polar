@@ -234,7 +234,7 @@ Polar only does not see DMs.
   «⏳ En cola: n antes» and marks the task `overflow`: the laptop may then claim it even when `where_hint` is
   `server` (overflow to the laptop when the server is full). A finished tmux session becomes `done` (the status message turns to «✅ Terminó: <report>», or «sin informe todavía» until a report comes); a session that parked
   (marker file in `~/.local/state/agent-bus/parked/`) becomes `parked`.
-- Polar pre-accepts the Claude Code folder trust for the area folder (`~/work` or `~/personal`) in `~/.claude.json`. It never uses
+- Polar pre-accepts the Claude Code folder trust for the area folder (`~/work` or `~/personal`) in `~/.claude.json`. It does so only for a folder inside `POLAR_TRUST_ROOTS` (comma list of folder names in `~`, default `work,personal`), never inside `POLAR_TRUST_DENY` (default `oss`), `~` or `/`; the keys are the folder, its Git root and the main checkout root. It never uses
   `--dangerously-skip-permissions`: the session asks for permissions in its tmux pane. Attach from the laptop.
 - A card with `--requester "<session id> task-<id>"` gets its outcome typed into the session by Polar.
 - Env: `POLAR_LAPTOP_GRACE`, `POLAR_TASK_MAX`, `POLAR_TASK_MIN_FREE_GB`, `POLAR_WORK_DIR`, `POLAR_PERSONAL_DIR`, `POLAR_CLAUDE_BIN`, `POLAR_CLAUDE_ARGS`, `POLAR_TMUX_BIN`.

@@ -17,6 +17,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setenv("POLAR_CLAUDE_BIN", "/x/claude")
     monkeypatch.setenv("POLAR_TMUX_BIN", "/x/tmux")
     monkeypatch.setenv("POLAR_CLAUDE_JSON", str(tmp_path / "claude.json"))
+    monkeypatch.setenv("HOME", str(tmp_path))  # folder trust is checked against ~ (work, personal)
     monkeypatch.setenv("POLAR_PARKED_DIR", str(tmp_path / "parked"))
     monkeypatch.setenv("POLAR_LAPTOP_GRACE", "0")
     monkeypatch.delenv("POLAR_TRIAGE", raising=False)
