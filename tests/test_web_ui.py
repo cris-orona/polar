@@ -713,3 +713,67 @@ def test_specific_400_texts_reach_the_page(ui, conn):
     assert server.ui_error(400, {"error": "Something else"}) == strings.t("err_bad")
     js = (Path(views.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
     assert "r.data && r.data.error" in js  # the page shows the server text
+
+
+# -- file downloads ------------------------------------------------------------------------------------------------------
+def test_pdf_is_a_download_and_images_stay_inline(ui, conn, data):
+    pdf = data / "files" / "plan.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    png = data / "files" / "chart.png"
+    png.write_bytes(demo.chart_png(8, 8))
+    rid = report(conn, files=[str(pdf), str(png)])
+    code, raw, h = call(ui, "GET", "/files/%s/0" % rid)
+    assert code == 200 and raw.startswith(b"%PDF") and h["Content-Type"] == "application/pdf"
+    assert h["Content-Disposition"].startswith("attachment;")
+    code, _, h = call(ui, "GET", "/files/%s/1" % rid)
+    assert code == 200 and h["Content-Disposition"].startswith("inline;")
+    for name in ("0", "1"):
+        h = call(ui, "GET", "/files/%s/%s" % (rid, name))[2]
+        assert "frame-ancestors 'none'" in h["Content-Security-Policy"] and h["X-Frame-Options"] == "DENY"
+
+
+def test_file_name_cannot_inject_a_header(ui, conn, data):
+    bad = data / "files" / 'a\r\nSet-Cookie: x=1\r\n"b\\c\x7fñ.csv'
+    bad.write_text("a,b\n")
+    rid = report(conn, files=[str(bad)])
+    out = raw(ui.port, ("GET /files/%s/0 HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nCookie: %s\r\nConnection: close\r\n\r\n"
+                        % (rid, ui.port, session_cookie(ui))).encode())[0]
+    head = out.split(b"\r\n\r\n", 1)[0].decode("latin-1")
+    assert out.startswith(b"HTTP/1.1 200")
+    assert not [ln for ln in head.split("\r\n") if ln.lower().startswith("set-cookie")]
+    disp = [ln for ln in head.split("\r\n") if ln.startswith("Content-Disposition:")]
+    assert disp == ["Content-Disposition: attachment; filename=\"aSet-Cookie: x=1bc_.csv\"; "
+                    "filename*=UTF-8''aSet-Cookie%3A%20x%3D1bc%C3%B1.csv"]
+    assert server.disposition("inline", "\r\n") == "inline; filename=\"file\"; filename*=UTF-8''file"
+
+
+def test_file_is_streamed_in_chunks(ui, conn, data, monkeypatch):
+    big = data / "files" / "big.bin"
+    blob = os.urandom(server.CHUNK * 3 + 17)
+    big.write_bytes(blob)
+    rid = report(conn, files=[str(big)])
+    sizes = []
+    real_open = open
+
+    class Spy:
+        def __init__(self, fh):
+            self.fh = fh
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.fh.close()
+
+        def fileno(self):
+            return self.fh.fileno()
+
+        def read(self, n=-1):
+            sizes.append(n)
+            return self.fh.read(n)
+
+    monkeypatch.setattr(server, "open", lambda p, m="r", *a, **k: Spy(real_open(p, m, *a, **k)), raising=False)
+    code, body, h = call(ui, "GET", "/files/%s/0" % rid)
+    assert code == 200 and body == blob and h["Content-Length"] == str(len(blob))
+    assert sizes and max(sizes) <= server.CHUNK and -1 not in sizes
+    assert call(ui, "HEAD", "/files/%s/0" % rid)[1] == b""
