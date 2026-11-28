@@ -545,7 +545,7 @@ def test_send_failure_shows_error(ui, conn, reply_id, user, monkeypatch):
 
 
 # -- files ---------------------------------------------------------------------------------------------------------------
-def test_files_inside_root_only(ui, conn, data, tmp_path):
+def test_files_serve_only_paths_inside_the_roots(ui, conn, data, tmp_path):
     good = data / "files" / "chart.png"
     good.write_bytes(demo.chart_png(8, 8))
     outside = tmp_path / "secret.txt"
@@ -559,7 +559,16 @@ def test_files_inside_root_only(ui, conn, data, tmp_path):
     for n in (1, 2, 3, 4, 99):
         assert call(ui, "GET", "/files/%s/%d" % (rid, n))[0] == 404
     assert call(ui, "GET", "/files/%s/-1" % rid)[0] == 404
-    assert call(ui, "GET", "/files/..%2F..%2Fetc/0")[0] == 404
+
+
+@pytest.mark.parametrize("cid, looked_up", [("..%2F..%2Fetc", ["../../etc"]), ("nope", ["nope"]), ("x" * 41, [])])
+def test_files_need_a_known_card_id(ui, cid, looked_up, monkeypatch):
+    """The id part of /files/<id>/<n> is only a card id for the database; an unknown or too long id is a 404."""
+    asked = []
+    real_get = db.get
+    monkeypatch.setattr(db, "get", lambda conn, rid: asked.append(rid) or real_get(conn, rid))
+    assert call(ui, "GET", "/files/%s/0" % cid)[0] == 404
+    assert asked == looked_up
 
 
 def test_other_files_download(ui, conn, data):
