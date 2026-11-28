@@ -275,7 +275,28 @@ def _answer(polar: Polar, req: Dict[str, Any], body: Dict[str, Any]) -> None:
     polar.on_q_send(owner, rid, src=SRC)
 
 
-class _Handler(BaseHTTPRequestHandler):
+class CloseOnError(BaseHTTPRequestHandler):
+    """Close the connection after every error answer. An early refusal does not read the request body, so on a
+    kept-alive connection that body would be parsed as the next request (request smuggling)."""
+
+    def send_response(self, code: int, message: Optional[str] = None) -> None:
+        super().send_response(code, message)
+        if code >= 400:
+            self.close_connection = True
+            self.send_header("Connection", "close")
+
+    def send_error(self, code: int, message: Optional[str] = None, explain: Optional[str] = None) -> None:
+        """A short JSON error with no server details. All answers pass `send_response`, so this one closes too."""
+        data = json.dumps({"ok": False, "error": "HTTP %d" % code}).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        if self.command != "HEAD" and code >= 200 and code not in (204, 304):
+            self.wfile.write(data)
+
+
+class _Handler(CloseOnError):
     server_version = "polar-web"
     protocol_version = "HTTP/1.1"
 
