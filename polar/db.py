@@ -132,6 +132,7 @@ TASK_NEW_COLUMNS = {
     "where_hint": "TEXT NOT NULL DEFAULT 'laptop'",
     "status_ts": "TEXT",    # the one status message of the task (edited in place)
     "status_text": "TEXT",  # what that message says now
+    "area": "TEXT NOT NULL DEFAULT 'work'",  # the folder of a new session (tasks.AREAS)
 }
 
 

@@ -217,6 +217,10 @@ def build_parser() -> argparse.ArgumentParser:
     ts_.add_argument("--reason", default="")
     ts_.add_argument("--where", choices=["laptop", "server"], default="server",
                      help="where a new session runs: server (default, at once) or laptop (with grace; browser or local Supabase)")
+    ts_.add_argument("--area", choices=["work", "personal"], default=None,
+                     help="the folder of a new session: work (~/work) or personal (~/personal: not team "
+                          "work, so the team memory does not read it). Not given: work for --none, the area "
+                          "of the matched session for --match")
 
     rt = sub.add_parser("routes", help="routed tasks that the laptop must deliver (JSON list)")
     rt.add_argument("--json", action="store_true")
@@ -772,7 +776,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.match and not (args.confidence and args.label):
                 raise ValueError("--match needs --label and --confidence")
             ok = Tasks(db.connect(), None, "").triage_set(
-                args.id, None if args.none else args.match, args.label, args.confidence or "", args.reason, args.where)
+                args.id, None if args.none else args.match, args.label, args.confidence or "", args.reason, args.where,
+                args.area)
             _out({"id": args.id, "set": ok})
             return 0 if ok else 1
         if args.cmd == "routes":

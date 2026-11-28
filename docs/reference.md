@@ -185,6 +185,15 @@ Polar only does not see DMs.
   «Sin respuesta de la laptop; abro sesión nueva.». `POLAR_TRIAGE=0` turns triage off. Each pick item has its
   own task, thread and triage. The laptop delivers routed tasks (`polar routes`, then `polar route-done <id>`).
   After delivery the «No, sesión nueva» button does nothing.
+- Area (the folder of a new session): `polar triage-set … --area work|personal`. With no `--area`: `work` for
+  `--none`, the area of the matched session for `--match`. `work` runs in `~/work` (`POLAR_WORK_DIR`), where a shared
+  team memory may read each prompt. `personal` runs in `~/personal` (`POLAR_PERSONAL_DIR`): work that is not team
+  work. That folder is in no git repo and not under `~/work`, so that memory reads nothing there. A match keeps its
+  area too (a later «Sesión nueva» opens in that folder). A task that the thread owner or a plan sends to a session
+  takes the area of that session. `polar resume` and a handoff from a server session use the area of the Polar task
+  that started the session (`work` when Polar did not start it). Every task that no triage answer reaches starts in
+  `work`: the triage timeout, `POLAR_TRIAGE=0`, an «Abrir agente» card, a card with no session when triage is off.
+  A failed route keeps the area of the match. To add an area, add one row to `tasks.AREAS` and one choice to the CLI.
 - Status follows the bus: `follow_bus` (tick step, at most once each 60 s, one `agent-bus sessions --json --days 30`
   call) follows each session to its newest handoff or wake successor. Bus `closed` sets `done`; a `running` task
   whose session is `parked` sets `parked`; a `parked` task whose successor is live on the server in a `task-*` tmux
@@ -194,23 +203,23 @@ Polar only does not see DMs.
   asks the bus before it decides `parked` or `done`. `polar follow-bus [--dry-run]` runs one pass by hand.
 - Placement: the laptop is first, the server is the fallback. A queued task waits `POLAR_LAPTOP_GRACE`
   seconds (120) for the laptop to claim it. The laptop lists the queue with `polar queue --json` (id, text,
-  title, thread_ts, created_at, where_hint, overflow) and takes one with `polar claim <id> --host laptop --tab <label> --session <sid>
+  title, thread_ts, created_at, where_hint, overflow, area, cwd) and takes one with `polar claim <id> --host laptop --tab <label> --session <sid>
   [--pane <pane>]`. The claim is atomic (queued to running, column `host` = `laptop`); it exits 1 when the task
   is not queued any more (the server took it). The server tick then posts «▶️ Abrí "<title>" en la laptop (pestaña <n>).».
   `polar task-done <id>` (the laptop tab closed) sets `done` and edits the task's status message to «✅ Terminó». Polar does not reap, launch
   or tmux-steer a `host=laptop` task. A thread reply (or a card reply) for it appears in `polar steers` with
   requester `<session> <pane>`, and the laptop types it into the pane.
 - After the grace, the server launcher runs in the server tick (every 5 s). For each queued task it starts
-  `tmux new-session -d -s task-<id> -c ~/work "claude --session-id <uuid> \"$(cat brief)\""`
+  `tmux new-session -d -s task-<id> -c <area folder> "claude --session-id <uuid> \"$(cat brief)\""`
   when fewer than `POLAR_TASK_MAX` (code default 4, service file 14) `task-*` tmux sessions hold a slot and free memory
   (vm_stat free + inactive + speculative) is at least `POLAR_TASK_MIN_FREE_GB` (2.5). Else it posts
   «⏳ En cola: n antes» and marks the task `overflow`: the laptop may then claim it even when `where_hint` is
   `server` (overflow to the laptop when the server is full). A finished tmux session becomes `done` (the status message turns to «✅ Terminó: <report>», or «sin informe todavía» until a report comes); a session that parked
   (marker file in `~/.local/state/agent-bus/parked/`) becomes `parked`.
-- Polar pre-accepts the Claude Code folder trust for `~/work` in `~/.claude.json`. It never uses
+- Polar pre-accepts the Claude Code folder trust for the area folder (`~/work` or `~/personal`) in `~/.claude.json`. It never uses
   `--dangerously-skip-permissions`: the session asks for permissions in its tmux pane. Attach from the laptop.
 - A card with `--requester "<session id> task-<id>"` gets its outcome typed into the session by Polar.
-- Env: `POLAR_LAPTOP_GRACE`, `POLAR_TASK_MAX`, `POLAR_TASK_MIN_FREE_GB`, `POLAR_WORK_DIR`, `POLAR_CLAUDE_BIN`, `POLAR_CLAUDE_ARGS`, `POLAR_TMUX_BIN`.
+- Env: `POLAR_LAPTOP_GRACE`, `POLAR_TASK_MAX`, `POLAR_TASK_MIN_FREE_GB`, `POLAR_WORK_DIR`, `POLAR_PERSONAL_DIR`, `POLAR_CLAUDE_BIN`, `POLAR_CLAUDE_ARGS`, `POLAR_TMUX_BIN`.
 
 ```sh
 bin/polar tasks [--json] [--status running]   # id, title, status, tmux, session_id, thread_ts, created_at, activity_at

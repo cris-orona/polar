@@ -34,6 +34,12 @@ SERVER_LABEL = SERVER_NAME or "el servidor"
 SERVER_HOST = "".join(c for c in (SERVER_NAME or "server") if c.isalnum() or c in "-_.") or "server"
 # launchd label of the coord-tick agent: the watchdog text tells the owner how to kick it.
 COORD_TICK_LABEL = os.environ.get("POLAR_COORD_TICK_LABEL") or "coord-tick"
+# The folder of a new session, by the kind of work. `work` runs in ~/work, where a shared team memory may read each
+# prompt. Any other work (own tools, private life) runs in ~/personal: no git repo and not under ~/work, so that
+# memory reads nothing there. One row per area; the env override is for tests and the default is the folder in
+# the home of the machine.
+AREAS = {"work": ("POLAR_WORK_DIR", "work"), "personal": ("POLAR_PERSONAL_DIR", "personal")}
+DEFAULT_AREA = "work"
 DEFAULT_WHERE = "laptop" if os.environ.get("POLAR_DEFAULT_WHERE") == "laptop" else "server"
 TITLE_MAX = 60
 MIN_ITEMS = 3
@@ -290,8 +296,16 @@ class Tasks:
     def min_free_gb(self) -> float:
         return env_float("POLAR_TASK_MIN_FREE_GB", 2.5)
 
-    def work_dir(self) -> Path:
-        return Path(os.environ.get("POLAR_WORK_DIR") or Path.home() / "work").expanduser()
+    def work_dir(self, area: Optional[str] = None) -> Path:
+        env, name = AREAS.get(area or DEFAULT_AREA) or AREAS[DEFAULT_AREA]
+        return Path(os.environ.get(env) or Path.home() / name).expanduser()
+
+    def area_of_session(self, session_id: str) -> str:
+        """The area of the Polar task that started `session_id` (DEFAULT_AREA when Polar did not start it)."""
+        row = self.conn.execute("SELECT area FROM tasks WHERE kind='task' AND session_id=? ORDER BY created_at DESC"
+                                " LIMIT 1", (session_id,)).fetchone() if session_id else None
+        area = row["area"] if row else None
+        return area if area in AREAS else DEFAULT_AREA
 
     def claude_bin(self) -> Optional[str]:
         return os.environ.get("POLAR_CLAUDE_BIN") or _find("claude", ("~/.local/bin",))
@@ -514,7 +528,7 @@ class Tasks:
             if found:
                 return self._insert("task", "matched", clip_title(text), full, channel, thread_ts, msg_ts,
                                     match_session=found[0], match_label=found[1][:80], match_reason=OWNER_REASON,
-                                    match_conf="high",
+                                    match_conf="high", area=self.area_of_session(found[0]),
                                     where_hint=where if where in WHERE_VALUES else DEFAULT_WHERE)
         if intake and self.status_answer_on() and is_status_question(text):
             tid = self._insert("task", "answering", clip_title(text), full, channel, thread_ts, msg_ts,
@@ -594,7 +608,8 @@ class Tasks:
                      "printf '%s' '<resultado>' | ~/.local/bin/herdr-deliver --tmux " + back + " - ; "
                      "luego termina con /exit.")
         return self._insert("task", "queued", clip_title(title or text), body, OWNER_DM, "", None,
-                            where_hint="laptop-only", requester=requester or None)
+                            where_hint="laptop-only", requester=requester or None,
+                            area=self.area_of_session(sid))  # the helper works in the folder of the asker
 
     def create_agent_task(self, channel: str, thread_ts: str, text: str,
                           where: str = DEFAULT_WHERE, msg_ts: Optional[str] = None) -> Optional[str]:
@@ -1019,6 +1034,7 @@ class Tasks:
                 tid = self._insert("task", "matched", clip_title(text), text, pick["channel"], root, None,
                                    match_session=sess, match_label=(it.get("label") or sess)[:80],
                                    match_reason=(it.get("reason") or "")[:160], match_conf="high",
+                                   area=self.area_of_session(sess),
                                    where_hint=it.get("where") if it.get("where") in WHERE_VALUES else DEFAULT_WHERE)
             else:
                 tid = self.create_task(pick["channel"], root, None, text, it.get("where") or DEFAULT_WHERE)
@@ -1099,19 +1115,22 @@ class Tasks:
 
     # -- triage: does the task belong to an existing session? ----------------
     def triage_set(self, tid: str, match: Optional[str], label: str = "", confidence: str = "",
-                   reason: str = "", where: str = DEFAULT_WHERE) -> bool:
+                   reason: str = "", where: str = DEFAULT_WHERE, area: Optional[str] = None) -> bool:
         """The laptop router answers. `match=None` means a new session. Only a `triage` task accepts it.
-        `where` says where a new session runs: `laptop` (default, with grace) or `server` (no grace)."""
+        `where` says where a new session runs: `laptop` (default, with grace) or `server` (no grace). `area` says in
+        which folder (AREAS) a new session starts. None: DEFAULT_AREA for a new session, the area of the matched
+        session for a match (the matched session already works in its folder)."""
         t = self.get(tid)
         if not t or t["status"] != "triage":
             return False
-        if where not in WHERE_VALUES:
+        if where not in WHERE_VALUES or (area is not None and area not in AREAS):
             return False
         if not match or confidence not in ("high", "medium"):
-            self.update(tid, status="queued", queue_notified=0, where_hint=where)
+            self.update(tid, status="queued", queue_notified=0, where_hint=where, area=area or DEFAULT_AREA)
             return True
+        # The area stays on a match too: «No, sesión nueva» or a failed route opens a new session in that folder.
         self.update(tid, status="matched", where_hint=where, match_session=match, match_label=label[:80],
-                    match_reason=reason[:160], match_conf=confidence)
+                    match_reason=reason[:160], match_conf=confidence, area=area or self.area_of_session(match))
         return True
 
     def process_triage(self) -> None:
@@ -1432,7 +1451,7 @@ class Tasks:
 
     def launch(self, t: Dict[str, Any]) -> bool:
         claude = self.claude_bin()
-        work = self.work_dir()
+        work = self.work_dir(t.get("area"))
         name = "task-" + t["id"]
         if not claude:
             self.update(t["id"], status="failed", finished_at=db.now_iso())
@@ -1479,7 +1498,7 @@ class Tasks:
         claude = self.claude_bin()
         if live is None or name in live or not claude:
             return False
-        work = self.work_dir()
+        work = self.work_dir(self.area_of_session(session_id))  # --resume finds a transcript only in its folder
         work.mkdir(parents=True, exist_ok=True)
         self.ensure_trust(work)
         path_env = os.pathsep.join([os.path.expanduser("~/.local/bin"), "/opt/homebrew/bin",
@@ -1495,9 +1514,15 @@ class Tasks:
     def queue_list(self) -> List[Dict[str, Any]]:
         # overflow: the server could not start it (slots full or low memory), so the laptop may take it even when
         # where_hint is server (coordination slice 6).
+        # `cwd`: the folder of the new session, as ~/<name> (each machine has its own home).
         return [dict(public_triage(t), where_hint=t.get("where_hint") or DEFAULT_WHERE,
-                     overflow=bool(t.get("queue_notified")))
+                     overflow=bool(t.get("queue_notified")), area=self.area_or_default(t),
+                     cwd="~/" + AREAS[self.area_or_default(t)][1])
                 for t in self.rows("task", "queued")]
+
+    @staticmethod
+    def area_or_default(t: Dict[str, Any]) -> str:
+        return t.get("area") if t.get("area") in AREAS else DEFAULT_AREA
 
     def claim(self, tid: str, host: str, tab: str, session: str, pane: str = "") -> bool:
         """The laptop takes a queued task. Atomic: only one of laptop and server wins."""

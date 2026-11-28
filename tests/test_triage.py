@@ -13,6 +13,7 @@ from tests.test_tasks import Sh, msg, texts
 def env(monkeypatch, tmp_path):
     monkeypatch.setenv("POLAR_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("POLAR_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("POLAR_PERSONAL_DIR", str(tmp_path / "personal"))
     monkeypatch.setenv("POLAR_CLAUDE_BIN", "/x/claude")
     monkeypatch.setenv("POLAR_TMUX_BIN", "/x/tmux")
     monkeypatch.setenv("POLAR_CLAUDE_JSON", str(tmp_path / "claude.json"))
@@ -245,3 +246,132 @@ def test_plan_item_where_validated():
     bad = {"groups": [{"key": "now", "items": [{"i": 0, "title": "t", "where": "x"}]}]}
     with pytest.raises(ValueError):
         validate_plan(bad, 1)
+
+
+# -- area: the folder of a new session (work that is not team runs outside ~/work, so the
+# team memory does not read its prompts) ------------------------------------------------------------------------
+def test_area_defaults_to_work_and_launches_in_work(tk, sh, tmp_path):
+    a = new_task(tk)
+    assert tk.triage_set(a, None, where="server")
+    assert tk.get(a)["area"] == "work"
+    tk.tick()
+    new = sh.of("new-session")[0]
+    assert new[5:7] == ["-c", str(tmp_path / "work")]
+
+
+def test_area_personal_launches_in_the_personal_folder_and_trusts_it(tk, sh, tmp_path):
+    a = new_task(tk)
+    assert tk.triage_set(a, None, where="server", area="personal")
+    tk.tick()
+    t = tk.get(a)
+    assert t["status"] == "running" and t["area"] == "personal"
+    new = sh.of("new-session")[0]
+    assert new[5:7] == ["-c", str(tmp_path / "personal")] and (tmp_path / "personal").is_dir()
+    assert not (tmp_path / "work").exists()
+    projects = json.loads((tmp_path / "claude.json").read_text())["projects"]
+    assert projects[str(tmp_path / "personal")]["hasTrustDialogAccepted"] is True
+
+
+def test_area_bad_value_refused_and_task_stays_in_triage(tk):
+    a = new_task(tk)
+    assert not tk.triage_set(a, None, area="nonexistent")
+    assert tk.get(a)["status"] == "triage"
+
+
+def test_resume_uses_the_folder_of_the_task_that_started_the_session(tk, sh, tmp_path):
+    a = new_task(tk)
+    tk.triage_set(a, None, where="server", area="personal")
+    tk.tick()
+    sid = tk.get(a)["session_id"]
+    sh.live = []  # the session ended
+    assert tk.resume_session(sid)
+    new = [c for c in sh.of("new-session") if "--resume " + sid in c[-1]][0]
+    assert new[5:7] == ["-c", str(tmp_path / "personal")]
+
+
+def test_resume_of_a_session_polar_did_not_start_uses_work(tk, sh, tmp_path):
+    sid = "0f0e0d0c-1111-2222-3333-444455556666"
+    sh.live = []
+    assert tk.resume_session(sid)
+    assert sh.of("new-session")[-1][5:7] == ["-c", str(tmp_path / "work")]
+
+
+def test_handoff_keeps_the_area_of_the_asking_session(tk, sh):
+    a = new_task(tk)
+    tk.triage_set(a, None, where="server", area="personal")
+    tk.tick()
+    sid = tk.get(a)["session_id"]
+    h = tk.create_handoff("Mira", "Lee la pagina", sid + " task-" + a)
+    assert tk.get(h)["area"] == "personal"
+    q = [x for x in tk.queue_list() if x["id"] == h][0]
+    assert q["area"] == "personal" and q["cwd"] == "~/personal"
+    other = tk.create_handoff("Mira", "Otra", "")
+    assert tk.get(other)["area"] == "work"
+
+
+def test_queue_json_carries_area_and_folder(bot, sh, capsys):
+    tk = Tasks(db.connect(), bot, OWNER, sh=sh)
+    a = new_task(tk)
+    b = new_task_text(tk, "Ajusta mi CV")
+    assert cli.main(["triage-set", a, "--none", "--where", "laptop"]) == 0
+    assert cli.main(["triage-set", b, "--none", "--where", "laptop", "--area", "personal"]) == 0
+    capsys.readouterr()
+    assert cli.main(["queue", "--json"]) == 0
+    out = {q["id"]: q for q in json.loads(capsys.readouterr().out)}
+    assert (out[a]["area"], out[a]["cwd"]) == ("work", "~/work")
+    assert (out[b]["area"], out[b]["cwd"]) == ("personal", "~/personal")
+
+
+def test_cli_area_bad_value_is_an_argparse_error(bot, sh):
+    tk = Tasks(db.connect(), bot, OWNER, sh=sh)
+    a = new_task(tk)
+    with pytest.raises(SystemExit):
+        cli.main(["triage-set", a, "--none", "--area", "moon"])
+    assert tk.get(a)["status"] == "triage"
+
+
+def new_task_text(tk, text):
+    before = {r["id"] for r in tk.rows("task")}
+    tk.on_message(msg(text, ts="20.%d" % len(before)))
+    return [r["id"] for r in tk.rows("task") if r["id"] not in before][0]
+
+
+def test_a_match_keeps_its_area_when_the_owner_asks_for_a_new_session(tk, sh, tmp_path):
+    a = new_task(tk)
+    assert tk.triage_set(a, "S1", "tab 3", "medium", "r", area="personal")
+    tk.tick()
+    assert tk.get(a)["status"] == "routed"  # a medium match routes at once (2ab578b); «No, sesión nueva» stays
+    assert tk.route_new(a)
+    tk.tick()
+    assert tk.get(a)["status"] == "running"
+    assert sh.of("new-session")[-1][5:7] == ["-c", str(tmp_path / "personal")]
+
+
+def test_a_match_with_no_area_takes_the_area_of_the_matched_session(tk, sh):
+    first = new_task(tk)
+    tk.triage_set(first, None, where="server", area="personal")
+    tk.tick()
+    sid = tk.get(first)["session_id"]
+    b = new_task_text(tk, "Sigue con lo de mi CV")
+    assert tk.triage_set(b, sid, "tab 3", "high", "r")  # the router gave no --area
+    assert tk.get(b)["area"] == "personal"
+    c = new_task_text(tk, "Otra cosa del mismo tema")
+    assert tk.triage_set(c, sid, "tab 3", "high", "r", area="work")  # an explicit area wins
+    assert tk.get(c)["area"] == "work"
+    d = new_task_text(tk, "Una tarea nueva")
+    assert tk.triage_set(d, None)
+    assert tk.get(d)["area"] == "work"
+
+
+def test_an_old_database_gets_the_area_column_with_work(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    db.connect(path)  # today's schema, then take the column away: a database from before 2026-11-26
+    raw = sqlite3.connect(path)
+    raw.execute("ALTER TABLE tasks DROP COLUMN area")
+    raw.execute("INSERT INTO tasks(id, kind, status, title, text, channel, created_at, updated_at) "
+                "VALUES('t-old', 'task', 'queued', 't', 'x', 'D1', '2026-11-26 10:00:00', '2026-11-26 10:00:00')")
+    raw.commit()
+    raw.close()
+    conn = db.connect(path)
+    assert conn.execute("SELECT area FROM tasks WHERE id='t-old'").fetchone()["area"] == "work"
