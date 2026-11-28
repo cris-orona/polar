@@ -23,7 +23,7 @@ The web UI (`polar/web/`, on when `POLAR_UI_PORT` is set) applies these checks t
 
 - It binds to 127.0.0.1 only. A reverse proxy is the only way in from another machine.
 - Login: `polar ui-url` prints `http://127.0.0.1:<port>/login?token=<login token>`. `GET /login` with the right
-  token sets the cookie `polar_ui` (`HttpOnly; SameSite=Strict; Path=/`, about 180 days) and answers 303 to `/`. A
+  token sets the cookie `polar_ui_<port>` (`HttpOnly; SameSite=Lax; Path=/`, about 180 days) and answers 303 to `/`. A
   wrong or missing token: 403. Every other route except `/healthz` and `/static/` needs that cookie: a page or a file
   answers a 401 page that only says how to log in, and the API answers a 401 JSON error. The login token is
   `HMAC(secret, "polar-ui-login")` and the cookie value is `HMAC(secret, "polar-ui-session")`, where the secret is
@@ -37,8 +37,9 @@ The web UI (`polar/web/`, on when `POLAR_UI_PORT` is set) applies these checks t
 - Request framing (UI and web API): a request with `Transfer-Encoding`, with more than one `Content-Length`, with a
   `Content-Length` that is not 1 to 7 digits, or a GET or HEAD with a body gets 400 before any other check. Every
   answer with status 400 or more closes the connection, and so does any answer sent before the body was read. So a
-  body is never parsed as a second request. If a file read fails after the headers went out, the connection closes. Error pages are short plain text with the same headers as a page and no Python version. A client
-  that sends nothing for 30 s is disconnected.
+  body is never parsed as a second request. If a file read fails after the headers went out, the connection closes.
+- Error pages are short plain text with the same headers as a page and no Python version. A client that sends
+  nothing for 30 s is disconnected.
 - Actions run through `webapi.perform`, with the same gates as the web API (`POLAR_WEB_ALLOW`).
 - Pages send `Content-Security-Policy` with `script-src 'self'` and no inline script, `frame-ancestors 'none'`,
   `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store`.
@@ -52,12 +53,25 @@ The web UI (`polar/web/`, on when `POLAR_UI_PORT` is set) applies these checks t
 The session cookie keeps out:
 
 - other users on the same machine: they cannot read `data/web-token`, so they cannot make the login link;
-- web pages in your browser: a page on another site cannot read the cookie or the CSRF token, and `SameSite=Strict`
-  keeps the cookie off its requests;
+- web pages in your browser: a page on another site cannot read the cookie or the CSRF token, and a POST needs a
+  same-site `Origin`, the CSRF token and a JSON body. The cookie is `SameSite=Lax`, not Strict, so a link to a card
+  from your chat app still opens the page logged in;
 - casual scripts and tools that only find the open port.
 
 It cannot keep out a program that runs as your own OS user. Such a program can read the secret file and the
 database, so it can act as you. Polar cannot defend against that: protect your user account.
+
+Other limits:
+
+- The login link is a permanent credential. It works until you rotate the secret.
+- The link stays in your browser history.
+- There is no logout for one browser. To log out every browser, delete `data/web-token` and restart Polar. This
+  also changes the web API token.
+- The cookie has no `Secure` flag, because the UI is plain http on 127.0.0.1. When you publish the UI through an
+  https proxy, you trust the path from the proxy to Polar.
+- Browsers send a cookie to every port of the same host. The cookie name holds the port, so two Polar UIs on one
+  machine do not overwrite each other, but a program on another port of 127.0.0.1 can get the cookie from your
+  browser.
 
 ## Good practice for users
 

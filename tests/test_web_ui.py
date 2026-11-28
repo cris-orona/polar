@@ -40,7 +40,7 @@ def ui(data, polar):
 
 def session_cookie(srv):
     """The Cookie header of a logged-in browser (what GET /login sets)."""
-    return "%s=%s" % (server.COOKIE, srv.session)
+    return "%s=%s" % (srv.cookie, srv.session)
 
 
 def call(srv, method, path, body=None, headers=None, host=None, login=True):
@@ -154,9 +154,9 @@ def test_no_session_gets_401_everywhere(ui, conn, decision_id, data):
     body = {"id": decision_id, "action": "choose", "option": "go"}
     code, out = post(ui, body, headers={"Cookie": ""})
     assert code == 401 and out["error"] == strings.t("err_login")
-    code, out = post(ui, body, headers={"Cookie": "%s=%s" % (server.COOKIE, "0" * 64)})
+    code, out = post(ui, body, headers={"Cookie": "%s=%s" % (ui.cookie, "0" * 64)})
     assert code == 401 and db.get(conn, decision_id)["status"] == "shown"
-    assert call(ui, "GET", "/", headers={"Cookie": "%s=wrong" % server.COOKIE}, login=False)[0] == 401
+    assert call(ui, "GET", "/", headers={"Cookie": "%s=wrong" % ui.cookie}, login=False)[0] == 401
     assert call(ui, "GET", "/healthz", login=False)[0] == 200
     assert call(ui, "GET", "/static/app.css", login=False)[0] == 200
 
@@ -176,8 +176,8 @@ def test_login_link(ui):
     code, _, h = call(ui, "GET", "/login?token=" + ui.login, login=False)
     assert code == 303 and h["Location"] == "/"
     cookie = h["Set-Cookie"]
-    assert cookie.startswith("%s=%s;" % (server.COOKIE, ui.session))
-    for part in ("HttpOnly", "SameSite=Strict", "Path=/", "Max-Age=%d" % server.COOKIE_MAX_AGE):
+    assert cookie.startswith("%s_%d=%s;" % (server.COOKIE, ui.port, ui.session))
+    for part in ("HttpOnly", "SameSite=Lax", "Path=/", "Max-Age=%d" % server.COOKIE_MAX_AGE):
         assert part in cookie
     assert 150 * 86400 < server.COOKIE_MAX_AGE < 200 * 86400
     jar = cookie.split(";")[0]
@@ -893,7 +893,13 @@ def test_good_post_keeps_the_connection(ui, conn, decision_id):
     assert out.count(b"HTTP/1.1 200") == 2 and closed
 
 
-# -- errors after the headers, odd digits -----------------------------------------------------------------
+# -- cookie per port, errors after the headers, odd digits -----------------------------------------------------------------
+def test_cookie_is_bound_to_the_port(ui):
+    assert ui.cookie == "%s_%d" % (server.COOKIE, ui.port)
+    for name in (server.COOKIE, "%s_%d" % (server.COOKIE, ui.port + 1)):
+        assert call(ui, "GET", "/", headers={"Cookie": "%s=%s" % (name, ui.session)}, login=False)[0] == 401
+
+
 def test_read_error_after_headers_only_closes(ui, conn, data, monkeypatch):
     f = data / "files" / "big.bin"
     f.write_bytes(b"a" * (server.CHUNK * 2))

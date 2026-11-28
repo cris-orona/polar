@@ -102,7 +102,8 @@ line. It binds `127.0.0.1`. The log line gives the URL, the command that prints 
 `POLAR_WEB_URL`; it never holds the token.
 
 Login: `polar ui-url` prints `http://127.0.0.1:<POLAR_UI_PORT>/login?token=<token>` (exit 2 when `POLAR_UI_PORT` is
-not set). Open it once: it sets the cookie `polar_ui` (`HttpOnly; SameSite=Strict; Path=/; Max-Age` 180 days).
+not set). Open it once: it sets the cookie `polar_ui_<port>` (`HttpOnly; SameSite=Lax; Path=/; Max-Age` 180 days).
+The link is a permanent credential until the secret is rotated: delete `data/web-token` to log out every browser.
 The token is `HMAC-SHA256(secret, "polar-ui-login")`, the cookie value `HMAC-SHA256(secret, "polar-ui-session")` and
 the CSRF token an HMAC of the secret and the cookie value; the secret is the web API token in `data/web-token`. Without
 the cookie, every route except `/login`, `/healthz` and `/static/` answers 401 (a short HTML page for pages and
